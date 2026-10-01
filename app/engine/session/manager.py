@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from ..output.manager import next_index
+
 
 @dataclass
 class SessionMetadata:
@@ -94,9 +96,13 @@ class SessionManager:
         date_dir = self.sessions_root / date_str
         date_dir.mkdir(parents=True, exist_ok=True)
 
-        count = len(list(date_dir.glob(f"{time_str}-*")))
-        session_num = f"{count + 1:03d}"
-        session_id = f"{time_str}-{session_num}"
+        # "개수 + 1" 대신 최대 번호 + 1 을 쓴다. 중간 세션이 지워졌을 때
+        # 살아있는 세션 폴더를 재사용해 session.json 을 덮어쓰는 것을 막는다.
+        index = next_index(
+            (p.name for p in date_dir.glob(f"{time_str}-*")),
+            prefix=f"{time_str}-",
+        )
+        session_id = f"{time_str}-{index:03d}"
         session_dir = date_dir / session_id
         session_dir.mkdir(parents=True, exist_ok=True)
 

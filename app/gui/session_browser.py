@@ -4,11 +4,11 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QWidget, QVBoxLayout, QLabel, QPushButton,
     QTreeWidget, QTreeWidgetItem, QSplitter, QMessageBox, QToolBar,
     QFormLayout, QGroupBox, QTextEdit,
 )
-from app.engine.session.manager import SessionManager, SessionMetadata
+from app.engine.session.manager import SessionManager
 
 
 class SessionHistoryBrowser(QWidget):

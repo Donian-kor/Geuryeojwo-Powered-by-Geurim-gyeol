@@ -119,7 +119,7 @@
   },
   "14": {
     "inputs": {
-      "prompt": "수영장에서 수영하는 한국여성의 비키니 브라자가 벗겨져 옷으로 가리지만, 흘러내리는 가슴이 너무 커 꼭지가 살짝 보인다. \n",
+      "prompt": "",
       "input_mode": "텍스트-이미지 생성 / Text-to-image",
       "max_output_chars": 0,
       "wh_ratio": "9:16",

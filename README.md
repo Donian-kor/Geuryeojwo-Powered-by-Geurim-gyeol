@@ -30,18 +30,23 @@ PySide6 GUI → Geurim-gyeol Engine → ComfyUI (HTTP/WebSocket) → 이미지
 
 ```bash
 # ComfyUI 설치 폴더에서
-python main.py --listen 8188
+python main.py --api --port 8188
 ```
 
+`--api` 가 있어야 이 프로그램이 쓰는 REST/WebSocket API 가 열립니다.
 기본 주소는 `http://127.0.0.1:8188` 입니다.
 다른 주소를 쓰려면 `config/comfyui.json` 을 고치세요.
 
 ```json
 {
-  "base_url": "http://127.0.0.1:8188",
-  "timeout_seconds": 600
+  "host": "127.0.0.1",
+  "port": 8188,
+  "timeout_seconds": 300,
+  "connect_timeout_seconds": 5
 }
 ```
+
+> `base_url` 키는 읽지 않습니다. 위 스키마(`host`/`port`)를 사용하세요.
 
 ### 2. 이 프로그램 실행
 
@@ -171,3 +176,7 @@ pip install -r requirements.txt
 ```
 
 `torch`, `diffusers`, `transformers`, `llama-cpp-python` 은 필요 없습니다.
+
+## v0.7 Architecture
+
+The GUI is being migrated toward feature-based modules under `app/gui/pages/`, reusable components under `app/gui/widgets/`, controllers under `app/gui/controllers/`, and background workers under `app/gui/workers/`. ComfyUI integration is isolated under `app/engine/comfy/`.

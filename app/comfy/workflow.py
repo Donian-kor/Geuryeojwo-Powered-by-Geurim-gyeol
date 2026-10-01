@@ -155,28 +155,173 @@ _KIND_MAP = {
     "sampler_name": "combo", "scheduler": "combo",
 }
 _MODEL_INPUTS = ("unet_name", "ckpt_name", "clip_name", "vae_name", "lora_name")
+_MODEL_FOLDERS = {
+    "unet_name": "diffusion_models", "ckpt_name": "checkpoints",
+    "clip_name": "text_encoders", "vae_name": "vae", "lora_name": "loras",
+}
+
+# 프롬프트를 실제로 "받아" 다음 노드로 넘기는 노드.
+# 이름이 TextEncode 로 시작하지 않아도 (인핸서 등) 후보가 된다.
+# class_type 보다 '링크가 아닌 문자열 값을 가진 prompt/text 입력' 이 더 확실한 기준이다.
+_TEXT_INPUTS = ("prompt", "text", "positive")
+# 샘플러 노드: seed/steps/cfg 는 여기서만 조작한다.
+_SAMPLER_NODES = ("KSampler", "Sampler", "KSamplerAdvanced")
+_SAMPLER_INPUTS = (
+    "seed", "steps", "cfg", "denoise", "sampler_name", "scheduler",
+)
 
 
 def infer_parameters(prompt: dict) -> dict[str, ParameterSpec]:
-    """parameters 맵이 없는 워크플로에서 조작할 파라미터를 찾는다."""
-    specs: dict[str, ParameterSpec] = {}
+    """parameters 맵이 없는 워크플로에서 조작할 파라미터를 찾는다.
+
+    class_type 이름만 믿지 않고 데이터 흐름을 따라간다.
+    (예: 인핸서 노드는 이름에 TextEncode 가 없어도 프롬프트를 받는다)
+
+    Returns:
+        dict[str, ParameterSpec]: 파라미터 이름 -> 정의
+    """
+    # 1) 프롬프트 입력 후보 모으기
+    #    값이 링크(["14", 0] 형태)면 앞 노드에서 온 것이므로 후보가 아니다.
+    #    GUI 프롬프트를 넣을 곳은 '문자열 값'을 실제로 가진 입력이다.
+    prompt_candidates: list[tuple[str, str]] = []
     for node_id, node in prompt.items():
         inputs = node.get("inputs") or {}
-        class_type = node.get("class_type", "")
+        for input_name in _TEXT_INPUTS:
+            if input_name not in inputs:
+                continue
+            if not isinstance(inputs[input_name], list):
+                prompt_candidates.append((node_id, input_name))
+            break
+
+    # 2) 실제로 쓰이는 샘플러 노드 찾기
+    sampler_nodes = _find_sampler_nodes(prompt)
+
+    specs: dict[str, ParameterSpec] = {}
+
+    # 3) 프롬프트: KSampler positive 로 흘러들어가는 쪽을 우선
+    if prompt_candidates:
+        specs["positive"] = _pick_prompt_candidate(
+            prompt, prompt_candidates, sampler_nodes
+        )
+
+    # 4) 나머지 파라미터
+    for node_id, node in prompt.items():
+        inputs = node.get("inputs") or {}
+        is_sampler = node_id in sampler_nodes
 
         for input_name, value in inputs.items():
+            # 연결(링크) 값과 모델 파일 선택은 제외
             if isinstance(value, list) or input_name in _MODEL_INPUTS:
                 continue
-            if input_name == "prompt" and class_type.startswith(("TextEncode", "CLIPText")):
-                specs["positive"] = ParameterSpec(
-                    "positive", node_id, input_name, "프롬프트", "text"
-                )
-            elif input_name == "negative_prompt":
+            # 프롬프트는 위에서 처리
+            if input_name in _TEXT_INPUTS:
+                continue
+            if input_name == "negative_prompt":
                 specs["negative"] = ParameterSpec(
                     "negative", node_id, input_name, "네거티브 프롬프트", "text"
                 )
-            elif input_name in _KIND_MAP:
-                specs[input_name] = ParameterSpec(
-                    input_name, node_id, input_name, None, _KIND_MAP[input_name]
-                )
+                continue
+            if input_name not in _KIND_MAP:
+                continue
+            # seed/steps/cfg 는 샘플러 노드의 것만 조작한다
+            # (인핸서에도 seed 가 있어 구분해야 한다)
+            if input_name in _SAMPLER_INPUTS and not is_sampler:
+                continue
+
+            specs[input_name] = ParameterSpec(
+                input_name, node_id, input_name, None, _KIND_MAP[input_name]
+            )
+
+    # 5) 모델 선택도 GUI 로 노출
+    for node_id, node in prompt.items():
+        for input_name, value in (node.get("inputs") or {}).items():
+            if isinstance(value, list) or input_name not in _MODEL_INPUTS:
+                continue
+            key, label = {
+                "lora_name": ("lora", "LoRA"),
+                "unet_name": ("unet", "확산 모델"),
+                "ckpt_name": ("checkpoint", "체크포인트"),
+                "clip_name": ("clip", "텍스트 인코더"),
+                "vae_name": ("vae", "VAE"),
+            }[input_name]
+            specs[key] = ParameterSpec(
+                key, node_id, input_name, label,
+                f"model:{_MODEL_FOLDERS[input_name]}",
+            )
     return specs
+
+
+def _upstream(node_id: str, prompt: dict) -> list[str]:
+    """node_id 의 입력으로 연결된(값만 읽어오는) 노드 목록."""
+    result = []
+    for value in (prompt.get(node_id, {}).get("inputs") or {}).values():
+        if (isinstance(value, list) and len(value) == 2
+                and isinstance(value[0], str) and value[0] in prompt):
+            result.append(value[0])
+    return result
+
+
+def _find_sampler_nodes(prompt: dict) -> set[str]:
+    """실제로 쓰이는 샘플러 노드를 찾는다.
+
+    이름이 KSampler 계열인지와, 출력이 SaveImage 쪽으로 흘러가는지를
+    함께 확인해 쓰이지 않는 샘플러(예: 워크플로에 묵혀 있는 노드)를 배제한다.
+    """
+    by_class = {
+        nid for nid, node in prompt.items()
+        if any(node.get("class_type", "").startswith(p) for p in _SAMPLER_NODES)
+    }
+    if not by_class:
+        return by_class
+
+    sinks = {
+        nid for nid, node in prompt.items()
+        if node.get("class_type", "") in ("SaveImage", "PreviewImage")
+    }
+    if not sinks:
+        return by_class
+
+    # SaveImage 에서 거슬러 올라가 만나는 샘플러를 찾는다.
+    found: set[str] = set()
+    stack = list(sinks)
+    seen: set[str] = set()
+    while stack:
+        nid = stack.pop()
+        if nid in seen:
+            continue
+        seen.add(nid)
+        stack.extend(_upstream(nid, prompt))
+        if nid in by_class:
+            found.add(nid)
+    return found or by_class
+
+
+def _pick_prompt_candidate(
+    prompt: dict,
+    candidates: list[tuple[str, str]],
+    sampler_nodes: set[str],
+) -> ParameterSpec:
+    """프롬프트 입력 후보 중 사용할 것을 고른다.
+
+    KSampler 쪽으로 직접 연결된 후보가 가장 확실하다.
+    예: 인핸서(14) -> TextEncode(4) -> KSampler(6) 구조라면 '14' 를 고른다.
+    """
+    def distance_to_sampler(node_id: str, limit: int = 8) -> int:
+        """KSampler 로 향하는 최단 경로 길이."""
+        seen: set[str] = set()
+        stack = [(node_id, 0)]
+        while stack:
+            cur, depth = stack.pop()
+            if cur in seen or depth > limit:
+                continue
+            seen.add(cur)
+            if cur in sampler_nodes and cur != node_id:
+                return depth
+            for nxt in _upstream(cur, prompt):
+                stack.append((nxt, depth + 1))
+        return 99
+
+    node_id, input_name = min(
+        candidates, key=lambda c: distance_to_sampler(c[0])
+    )
+    return ParameterSpec("positive", node_id, input_name, "프롬프트", "text")

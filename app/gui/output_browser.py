@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QPixmap, QIcon
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QWidget, QVBoxLayout, QLabel, QPushButton,
     QTreeWidget, QTreeWidgetItem, QSplitter, QMessageBox, QToolBar,
     QFileDialog,
 )
@@ -165,11 +165,27 @@ class OutputBrowser(QWidget):
         self._current_item = item
 
     def _open_folder(self) -> None:
-        """출력 폴더 열기."""
+        """출력 폴더 열기.
+
+        explorer 는 Windows 전용이라 문서가 내세우는 macOS/Linux 에서
+        동작하지 않고, 경로에 공백이 들어가면 실패한다.
+        OS 기본 파일 탐색기를 플랫폼별로 연다.
+        """
         import subprocess
+        import sys
+
+        path = str(self.outputs_root.resolve())
         try:
-            subprocess.run(f"explorer {self.outputs_root}", check=True)
+            if sys.platform == "win32":
+                import os
+
+                os.startfile(path)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
         except Exception:
+            # 폴더를 못 여도 프로그램 전체가 멈추면 안 된다
             pass
 
     def _delete_selected(self) -> None:
@@ -185,7 +201,8 @@ class OutputBrowser(QWidget):
         )
         if reply == QMessageBox.Yes:
             self.output_manager.delete_output(png_path)
-            self.tree.removeItemWidget(item, 0)
+            # QTreeWidgetItem 에 removeItemWidget 는 없는 메서드다 (Qt_API 오용).
+            # 부모에서 떼어내기만 하면 항목이 사라진다.
             item.parent().removeChild(item)
 
     def _save_as(self) -> None:

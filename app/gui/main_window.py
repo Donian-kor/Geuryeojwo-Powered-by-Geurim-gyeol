@@ -6,14 +6,25 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit,
     QComboBox, QSpinBox, QDoubleSpinBox, QPushButton, QProgressBar,
-    QMessageBox, QGroupBox, QTabWidget, QSizePolicy, QGridLayout,
+    QMessageBox, QGroupBox, QTabWidget, QSizePolicy, QGridLayout, QSlider, QCheckBox,
 )
-from app.engine.comfy_engine import GeurimGyeolEngine
+from app.engine.comfy_engine import GeurimGyeolEngine, _is_enhancer
 from app.gui.output_browser import OutputBrowser
 from app.gui.session_browser import SessionHistoryBrowser
 from app.gui.theme.manager import ThemeManager
 
 ROOT = Path(__file__).resolve().parents[2]
+
+# 파라미터 키 -> ComfyUI 입력 이름 (모델 선택 위젯 매핑용)
+_MODEL_INPUT_BY_KEY = {
+    "unet": "unet_name", "checkpoint": "ckpt_name", "clip": "clip_name",
+    "vae": "vae_name", "lora": "lora_name",
+}
+
+
+def combo_of_input(params: dict, key: str) -> str:
+    """파라미터 키에 대응하는 ComfyUI 입력 이름을 돌려준다."""
+    return _MODEL_INPUT_BY_KEY.get(key, key)
 
 
 class Worker(QThread):
@@ -72,9 +83,11 @@ class ModelInfoPanel(QGroupBox):
         if info.online:
             device = info.device_name or info.device_type or "CPU"
             self.device_label.setText(device)
-            if info.vram_total_gb:
+            # free 값이 없으면 used 도 None 이므로 함께 확인한다.
+            used = info.vram_used_gb
+            if info.vram_total_gb and used is not None:
                 self.vram_label.setText(
-                    f"{info.vram_used_gb:.1f} / {info.vram_total_gb:.1f} GB "
+                    f"{used:.1f} / {info.vram_total_gb:.1f} GB "
                     f"({info.vram_percent:.0f}%)"
                 )
             else:
@@ -195,12 +208,48 @@ class MainWindow(QWidget):
         form.addWidget(self.reload_wf)
         left.addWidget(models)
 
+        # 모델 선택 — ComfyUI 의 폴더별 목록에서 고른다 (v0.2 §5.3)
+        self.model_boxes=QGroupBox("Models"); ml=QGridLayout(models_box:=self.model_boxes)
+        ml.setHorizontalSpacing(4); ml.setVerticalSpacing(2)
+        # (파라미터 키, 라벨) — 워크플로가 LoRA/확산모델을 쓸 때만 활성화된다
+        self.model_combos: dict[str, QComboBox] = {}
+        for row, (key, caption) in enumerate(
+            (("unet", "확산 모델"), ("clip", "텍스트 인코더"),
+             ("vae", "VAE"), ("lora", "LoRA"))
+        ):
+            combo=QComboBox(); combo.setMinimumWidth(120)
+            self.model_combos[key]=combo
+            ml.addWidget(QLabel(caption), row, 0)
+            ml.addWidget(combo, row, 1)
+        left.addWidget(self.model_boxes)
+
+        # LoRA 강도 슬라이더 — 자주 바꾸므로 슬라이더가 편하다
+        self.lora_strength=QSlider(Qt.Horizontal); self.lora_strength.setRange(0,150)
+        self.lora_strength.setValue(100); self.lora_strength.setSingleStep(5)
+        self.lora_strength_label=QLabel("LoRA 강도 1.00")
+        self.lora_strength_label.setStyleSheet("color:#a0a0a0; font-size:11px;")
+        self.lora_strength.valueChanged.connect(
+            lambda v: self.lora_strength_label.setText(f"LoRA 강도 {v / 100:.2f}")
+        )
+        lora_row=QHBoxLayout(); lora_row.setSpacing(4)
+        lora_row.addWidget(self.lora_strength_label)
+        lora_row.addWidget(self.lora_strength, 1)
+        lora_box=QGroupBox("LoRA"); lora_lay=QVBoxLayout(lora_box); lora_lay.setSpacing(1)
+        lora_lay.addLayout(lora_row)
+        left.addWidget(lora_box)
+        self.lora_box=lora_box
+
         self.model_info=ModelInfoPanel(self.engine); left.addWidget(self.model_info)
         self.workflow.currentIndexChanged.connect(lambda _: self._on_workflow_changed())
 
         promptbox=QGroupBox("Prompt"); pl=QVBoxLayout(promptbox)
         self.prompt=QTextEdit(); self.prompt.setPlaceholderText("무엇을 그리고 싶나요?")
         self.prompt.setMinimumHeight(90); pl.addWidget(self.prompt)
+        # 프롬프트 인핸서 — ComfyUI 안의 LLM 노드가 프롬프트를 다듬는다.
+        # 느릴 수 있어 끌 수 있어야 한다.
+        self.enhance=QCheckBox("프롬프트 인핸서 사용 (더 정확해지지만 느림)")
+        self.enhance.setChecked(True)
+        pl.addWidget(self.enhance)
         left.addWidget(promptbox)
 
         params=QGroupBox("Generation"); pv=QVBoxLayout(params); pv.setSpacing(4)
@@ -289,9 +338,11 @@ class MainWindow(QWidget):
             pass
 
         info = self.engine.system_info
-        if info.online and info.vram_total_gb:
+        # vram_total_gb 이 있어도 vram_used_gb 이 None 일 수 있다( free 미제공 ).
+        used = info.vram_used_gb
+        if info.online and info.vram_total_gb and used is not None:
             self.status_vram.setText(
-                f"VRAM: {info.vram_used_gb:.1f}/{info.vram_total_gb:.1f}GB "
+                f"VRAM: {used:.1f}/{info.vram_total_gb:.1f}GB "
                 f"({info.vram_percent:.0f}%)"
             )
             self.status_gpu.setText(f"GPU: {info.device_name or info.device_type}")
@@ -299,33 +350,34 @@ class MainWindow(QWidget):
             self.status_vram.setText("VRAM: -")
             self.status_gpu.setText("GPU: -")
 
-    def _on_regenerate_from_output(self, prompt: str, params: dict) -> None:
-        """Output Browser에서 재생성 요청."""
+    def _apply_regenerated(self, prompt: str, params: dict) -> None:
+        """저장된 파라미터를 입력칸에 되돌린다 (Output/Session 공통)."""
         self.prompt.setPlainText(prompt)
-        if "width" in params: self.w.setValue(params["width"])
-        if "height" in params: self.h.setValue(params["height"])
-        if "steps" in params: self.steps.setValue(params["steps"])
-        if "cfg" in params: self.cfg.setValue(params["cfg"])
+        for key, widget, cast in (
+            ("width", self.w, int), ("height", self.h, int),
+            ("steps", self.steps, int), ("cfg", self.cfg, float),
+        ):
+            value = params.get(key)
+            if isinstance(value, (int, float)):
+                widget.setValue(cast(value))
         for field, combo in (
             ("sampler", self.sampler), ("scheduler", self.scheduler),
         ):
-            if field in params and combo.findText(params[field]) >= 0:
-                combo.setCurrentIndex(combo.findText(params[field]))
+            if field in params and combo.findText(str(params[field])) >= 0:
+                combo.setCurrentIndex(combo.findText(str(params[field])))
+        # LoRA 강도 복원 (없으면 기본값 유지)
+        value = params.get("lora_strength", params.get("strength_model"))
+        if isinstance(value, (int, float)):
+            self.lora_strength.setValue(int(round(float(value) * 100)))
+
+    def _on_regenerate_from_output(self, prompt: str, params: dict) -> None:
+        """Output Browser에서 재생성 요청."""
+        self._apply_regenerated(prompt, params)
         self.status.setText("파라미터를 불러왔습니다. 그려줘를 눌러주세요.")
 
     def _on_regenerate_from_session(self, prompt: str, params: dict, image_model: str) -> None:
         """Session History에서 재생성 요청."""
-        self.prompt.setPlainText(prompt)
-        if "width" in params: self.w.setValue(params["width"])
-        if "height" in params: self.h.setValue(params["height"])
-        if "steps" in params: self.steps.setValue(params["steps"])
-        if "cfg" in params: self.cfg.setValue(params["cfg"])
-        # sampler/scheduler 도 복원한다
-        for field, combo in (
-            ("sampler", self.sampler), ("scheduler", self.scheduler),
-        ):
-            if field in params and combo.findText(params[field]) >= 0:
-                combo.setCurrentIndex(combo.findText(params[field]))
+        self._apply_regenerated(prompt, params)
 
         # 세션에는 워크플로 이름이 저장되어 있다 (v0.2 에서는 모델 경로가 아니다)
         name = str(image_model)
@@ -365,7 +417,6 @@ class MainWindow(QWidget):
         if auto and offline:
             self.status_refresh.setEnabled(False)
             self.status.setText("ComfyUI 를 실행하는 중입니다. 잠시만 기다려주세요...")
-            QApplication.processEvents()
 
         try:
             self.engine.refresh_status()
@@ -423,9 +474,74 @@ class MainWindow(QWidget):
         if "cfg" in params and isinstance(defaults.get("cfg"), (int, float)):
             self.cfg.setValue(float(defaults["cfg"]))
         self._setup_sampler(params, defaults)
+        self._setup_models(params, defaults)
+        self._setup_lora_strength(params, defaults)
+        self._setup_enhancer(params, defaults)
         self.status.setText(
             f"{wf.name} · 파라미터 {len(params)}개 사용 가능"
         )
+
+    def _setup_enhancer(self, params: dict, defaults: dict) -> None:
+        """프롬프트 인핸서 스위치를 워크플로에 맞춘다.
+
+        인핸서 노드가 없는 워크플로에서는 의미가 없으므로 숨긴다.
+        """
+        has_enhancer = any(
+            _is_enhancer((node.get("class_type") or ""))
+            for node in (self.engine.active_workflow.prompt or {}).values()
+            if isinstance(node, dict)
+        )
+        self.enhance.setVisible(has_enhancer)
+
+    def _setup_models(self, params: dict, defaults: dict) -> None:
+        """모델 선택 드롭다운을 워크플로에 맞춘다.
+
+        워크플로에 없는 모델 종류는 비활성화한다.
+        ComfyUI 오프라인이면 워크플로 기본값만 보여준다.
+        """
+        options = self.engine.model_options()
+        for key, combo in self.model_combos.items():
+            combo.blockSignals(True)
+            combo.clear()
+            spec = params.get(key)
+            if spec is None:
+                # 이 워크플로는 이 모델을 쓰지 않는다
+                combo.addItem("(사용 안 함)")
+                combo.setEnabled(False)
+                combo.blockSignals(False)
+                continue
+
+            combo.setEnabled(True)
+            folder = spec.kind.split(":", 1)[1] if ":" in spec.kind else ""
+            items = list(options.get(folder) or [])
+            current = defaults.get(key)
+            if not items:
+                # ComfyUI 응답이 없으면 워크플로 기본값만
+                items = [current] if current else []
+            for item in items:
+                combo.addItem(item)
+            if current:
+                index = combo.findText(str(current))
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+            combo.blockSignals(False)
+
+    def _setup_lora_strength(self, params: dict, defaults: dict) -> None:
+        """LoRA 강도 슬라이더를 워크플로에 맞춘다.
+
+        워크플로마다 키가 "lora_strength" 또는 "strength_model" 처럼 다를 수
+        있으므로 실제 ComfyUI 입력 이름(spec.input)으로 판단한다.
+        """
+        by_input = {spec.input: key for key, spec in params.items()}
+        key = by_input.get("strength_model")
+        self._lora_strength_key = key
+        enabled = key is not None
+        self.lora_box.setVisible(enabled)
+        if not enabled:
+            return
+        value = defaults.get(key)
+        if isinstance(value, (int, float)):
+            self.lora_strength.setValue(int(round(float(value) * 100)))
 
     def _setup_sampler(self, params: dict, defaults: dict) -> None:
         """Sampler / Scheduler 드롭다운을 워크플로에 맞춘다.
@@ -498,6 +614,7 @@ class MainWindow(QWidget):
                 steps=self.steps.value(), cfg=self.cfg.value(),
                 seed=self.seed.value(),
                 extra=self._collect_extra(),
+                enhance_prompt=self.enhance.isChecked(),
             )
         except RuntimeError as exc:
             self.generate.setEnabled(True)
@@ -530,6 +647,17 @@ class MainWindow(QWidget):
             key = by_input.get("scheduler")
             if key and self.scheduler.currentText():
                 extra[key] = self.scheduler.currentText()
+        # 모델 선택 (확산 모델/텍스트 인코더/VAE/LoRA)
+        for model_key, combo in self.model_combos.items():
+            if not combo.isEnabled():
+                continue
+            key = by_input.get(combo_of_input(params, model_key))
+            if key and combo.currentText():
+                extra[key] = combo.currentText()
+        # LoRA 강도
+        key = getattr(self, "_lora_strength_key", None)
+        if key:
+            extra[key] = round(self.lora_strength.value() / 100, 2)
         return extra
 
     def _on_progress(self, percent, message):

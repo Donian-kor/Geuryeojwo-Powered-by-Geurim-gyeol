@@ -3,9 +3,8 @@
     네트워크나 ComfyUI 없이 순수 파일 I/O만 검증한다.
     """
 import json
+import shutil
 from pathlib import Path
-
-import pytest
 
 from app.engine.output.manager import OutputManager, OutputMetadata
 from app.engine.session.manager import SessionManager, SessionMetadata
@@ -36,6 +35,108 @@ def test_output_save_creates_png_and_json(tmp_path):
     assert data["seed"] == 1234
     assert data["prompt"] == "a cat"
     assert data["app"] == "Geuryeojwo"
+
+
+def test_output_does_not_overwrite_when_middle_file_deleted(tmp_path):
+    """중간 파일을 지워도 살아있는 파일을 덮어쓰지 않는다.
+
+    회귀: index = len(existing) + 1 방식이면
+    3개 저장 → 첫 번째 삭제 → 재저장 시 img_002_seed9.png 가 덮어써진다.
+    """
+    manager = OutputManager(tmp_path)
+    first_paths = []
+    for seed in (9, 18, 27):
+        png, _ = manager.save_output(FakeImage(), OutputMetadata(
+            seed=seed, model="m", prompt="p", negative_prompt="",
+            width=8, height=8, steps=4, cfg=4.0,
+        ))
+        first_paths.append(png)
+
+    # 첫 번째 파일 삭제 → 이제 2개만 남는다
+    first_paths[0].unlink()
+    first_paths[0].with_suffix(".json").unlink()
+
+    second_png, _ = manager.save_output(FakeImage(), OutputMetadata(
+        seed=9, model="m", prompt="p", negative_prompt="",
+        width=8, height=8, steps=4, cfg=4.0,
+    ))
+
+    # 남은 두 파일은 그대로 살아있어야 한다
+    for alive in first_paths[1:]:
+        assert alive.exists(), f"{alive.name} 이 덮어써졌다"
+    assert second_png != first_paths[1], "새 파일이 기존 파일과 겹치지 않아야 한다"
+
+
+def test_session_does_not_reuse_existing_folder(tmp_path):
+    """중간 세션을 지워도 살아있는 세션 폴더를 재사용하지 않는다.
+
+    회귀: 개수 + 1 방식이면 001/002 생성 → 001 삭제 → 새 생성 시
+    살아있는 002 폴더를 그대로 쓰고 session.json 을 덮어썼다.
+    """
+    manager = SessionManager(tmp_path)
+    meta = SessionMetadata(
+        original_prompt="p", enhanced_prompt="p", negative_prompt="",
+        llm_model=None, image_model="m", seed=1,
+        width=8, height=8, steps=4, cfg=4.0,
+    )
+
+    dirs = [manager.create_session(meta) for _ in range(3)]
+    marker = dirs[1] / "keepme.txt"
+    marker.write_text("살아있는 세션", encoding="utf-8")
+
+    shutil.rmtree(dirs[0])  # 첫 세션 삭제
+
+    fresh = manager.create_session(meta)
+    assert fresh not in (dirs[1], dirs[2]), "기존 세션 폴더를 재사용했다"
+    assert marker.exists(), "살아있는 세션의 내용이 사라졌다"
+    assert (fresh / "session.json").exists()
+
+
+def test_next_index_uses_maximum_not_count():
+    """next_index 헬퍼는 최대 번호를 기준으로 한다."""
+    from app.engine.output.manager import next_index
+
+    assert next_index([], prefix="img_") == 1
+    assert next_index(["img_001_seed9.png"], prefix="img_", suffix_before="_seed") == 2
+    # 002만 남았는데 (001 삭제) 개수 기준이면 2 → 충돌
+    assert next_index(
+        ["img_002_seed18.png", "img_005_seed27.png"],
+        prefix="img_",
+        suffix_before="_seed",
+    ) == 6
+
+
+def test_theme_manager_survives_broken_config(tmp_path):
+    """깨진 theme_config.json 이 있어도 프로그램이 시작된다.
+
+    회귀: json.loads 에 예외 처리가 없어 시작 자체가 실패했다.
+    """
+    import logging
+
+    from PySide6.QtWidgets import QApplication
+
+    from app.gui.theme.manager import ThemeManager
+
+    app = QApplication.instance() or QApplication([])
+    config = tmp_path / "theme_config.json"
+    config.write_text("{", encoding="utf-8")  # 잘못된 JSON
+
+    manager = ThemeManager(app, config)
+    assert manager.current_theme == "dark", "기본 테마로 시작해야 한다"
+    assert logging.getLogger("app.gui.theme.manager") is not None
+
+
+def test_output_metadata_version_matches_package(tmp_path):
+    """저장되는 metadata 버전이 프로그램 버전과 같다 (§7 단일 source of truth)."""
+    from app import __version__
+
+    manager = OutputManager(tmp_path)
+    _, js = manager.save_output(FakeImage(), OutputMetadata(
+        seed=1, model="m", prompt="p", negative_prompt="",
+        width=8, height=8, steps=4, cfg=4.0,
+    ))
+    assert json.loads(js.read_text(encoding="utf-8"))["version"] == __version__
+    assert __version__ != "0.1.0", "버전 문자열이 이전 판에 남아 있다"
 
 
 def test_output_listing_roundtrip(tmp_path):

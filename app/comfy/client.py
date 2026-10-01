@@ -21,7 +21,6 @@ import asyncio
 import json
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Callable
 
 import httpx
@@ -66,10 +65,13 @@ class SystemInfo:
         if not self.online:
             return f"ComfyUI 접속 실패 — {self.error or '응답 없음'}"
         device = self.device_name or self.device_type or "CPU"
-        if self.vram_total_gb:
+        # vram_total_gb 이 있어도 vram_free_gb 이 None 이면 vram_used_gb 도
+        # None 이다. 이 값을 그대로 :.1f 로 포맷하면 TypeError 가 난다.
+        used = self.vram_used_gb
+        if self.vram_total_gb and used is not None:
             return (
                 f"ComfyUI {self.comfyui_version} · {device} · "
-                f"VRAM {self.vram_used_gb:.1f}/{self.vram_total_gb:.1f}GB"
+                f"VRAM {used:.1f}/{self.vram_total_gb:.1f}GB"
             )
         return f"ComfyUI {self.comfyui_version} · {device} · VRAM 없음"
 
@@ -311,7 +313,8 @@ class ComfyClient:
         on_progress: Callable[[int, str], None] | None = None,
         on_stage: Callable[[str, str], None] | None = None,
         timeout: float | None = None,
-    ) -> list[dict]:
+        run_details: bool = False,
+    ) -> list[dict] | tuple[list[dict], dict, str]:
         """워크플로 실행 → 완료까지 대기 → 결과 이미지 목록 반환.
 
         Args:
@@ -320,25 +323,26 @@ class ComfyClient:
             on_stage: (state, message) 단계 변경 콜백
                 state ∈ queued|starting|encoding|sampling|decoding|saving
             timeout: 대기 제한(초). None 이면 설정값 사용
+            run_details: True 이면 (images, history, prompt_id) 를 반환한다.
+                인핸서가 실제로 만든 프롬프트를 읽는 데 필요하다 (B4).
 
         Returns:
-            [{filename, subfolder, type}, ...] /view 로 받을 수 있는 목록
+            [{filename, subfolder, type}, ...] /view 로 받을 수 있는 목록.
+            run_details=True 면 (위 목록, history dict, prompt_id) 튜플.
         """
         import websockets
 
         limit = timeout or self.config.timeout_seconds
         if on_stage:
             on_stage("queued", "ComfyUI에 제출합니다")
-        prompt_id = await self.queue_prompt(workflow)
 
-        progress_pct = 5
-        if on_progress:
-            on_progress(progress_pct, "ComfyUI 제출 완료")
-        if on_stage:
-            on_stage("starting", "ComfyUI 실행 시작")
-
+        # WebSocket 을 먼저 연다. POST 를 먼저 하면 실행이 빠른 워크플로에서
+        # "executing + node=null" 완료 신호가 연결 전에 지나가,
+        # 실제로 끝난 작업이 timeout_seconds 만큼 멈춘 뒤 타임아웃으로
+        # 오탐되는 문제가 있었다.
         last_error: str | None = None
         completed = False
+        prompt_id: str | None = None
 
         try:
             async with websockets.connect(
@@ -346,6 +350,14 @@ class ComfyClient:
                 open_timeout=self.config.connect_timeout_seconds,
                 max_size=16 * 1024 * 1024,
             ) as ws:
+                prompt_id = await self.queue_prompt(workflow)
+
+                progress_pct = 5
+                if on_progress:
+                    on_progress(progress_pct, "ComfyUI 제출 완료")
+                if on_stage:
+                    on_stage("starting", "ComfyUI 실행 시작")
+
                 deadline = asyncio.get_event_loop().time() + limit
 
                 while not completed:
@@ -362,6 +374,14 @@ class ComfyClient:
                     message = json.loads(raw)
                     msg_type = message.get("type")
                     data = message.get("data", {}) or {}
+
+                    # 같은 ComfyUI 를 다른 프로그램이 쓰는 중일 수 있으므로
+                    # 내 prompt_id 의 이벤트만 처리한다.
+                    # (status/queue 는 대상 지정이 없어 통과시킨다)
+                    if msg_type not in ("status", "queue"):
+                        event_prompt_id = data.get("prompt_id")
+                        if prompt_id and event_prompt_id and event_prompt_id != prompt_id:
+                            continue
 
                     if msg_type == "progress":
                         value = data.get("value") or 0
@@ -409,7 +429,7 @@ class ComfyClient:
                 images = _extract_images(history, prompt_id)
                 if on_progress:
                     on_progress(100, "완료")
-                return images
+                return (images, history, prompt_id) if run_details else images
 
         except ComfyUIError:
             raise
@@ -421,9 +441,37 @@ class ComfyClient:
                 if images:
                     if on_progress:
                         on_progress(100, "완료")
-                    return images
+                    return (images, history, prompt_id) if run_details else images
                 raise ComfyUIError(f"ComfyUI 연결이 끊어졌습니다: {exc}") from exc
             raise ComfyUIError(f"ComfyUI 통신 오류: {exc}") from exc
+
+
+def extract_text_outputs(history: dict, prompt_id: str) -> dict[str, str]:
+    """history 응답에서 노드별 텍스트 출력을 뽑는다.
+
+    T8ShowText 같은 노드는 실행 후 history 의 outputs 에
+    {"text": ["..."]} 형태로 결과를 남긴다. 프롬프트 인핸서를 켜고
+    생성했을 때 "실제로 이미지 모델에 들어간 프롬프트" 는
+    인핸서 노드의 이 출력이다 (B4).
+
+    Returns:
+        {node_id: 텍스트} — 텍스트 출력이 없으면 빈 dict
+    """
+    entry = history.get(prompt_id) or history.get(prompt_id.replace("-", "")) or {}
+    outputs = entry.get("outputs") or {}
+    texts: dict[str, str] = {}
+    for node_id, node_output in outputs.items():
+        if not isinstance(node_output, dict):
+            continue
+        for key in ("text", "text_g", "string", "prompt"):
+            value = node_output.get(key)
+            # ComfyUI 의 custom node 는 텍스트를 ["값"] 리스트로 준다.
+            if isinstance(value, list) and value and isinstance(value[0], str):
+                value = value[0]
+            if isinstance(value, str) and value.strip():
+                texts[str(node_id)] = value
+                break
+    return texts
 
 
 def _to_gb(value) -> float | None:
@@ -474,18 +522,3 @@ def _extract_images(history: dict, prompt_id: str) -> list[dict]:
                 }
             )
     return images
-    async def free_memory(self, unload_models: bool = True) -> None:
-        """POST /free — 모델 언로드로 메모리 정리 (v0.2 §6)."""
-        try:
-            await self._post(
-                "/free",
-                {"unload_models": unload_models, "free_memory": True},
-                timeout=30,
-            )
-        except ComfyUIError:
-            pass
-
-    async def is_busy(self) -> bool:
-        """현재 실행 중인지 확인."""
-        queue = await self.get_queue()
-        return bool(queue.get("queue_running"))

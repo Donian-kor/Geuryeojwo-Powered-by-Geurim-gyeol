@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from PySide6.QtCore import QObject
 from PySide6.QtWidgets import QApplication
@@ -55,11 +56,25 @@ class ThemeManager(QObject):
         self._load_config()
 
     def _load_config(self) -> None:
-        """설정 파일에서 테마 로드."""
-        if self.config_path and self.config_path.exists():
-            import json
+        """설정 파일에서 테마 로드.
+
+        설정 파일이 깨져 있어도 기본 테마로 시작해야 한다.
+        예외를 그대로 내면 프로그램 시작 자체가 실패한다.
+        """
+        if not (self.config_path and self.config_path.exists()):
+            return
+        import json
+        try:
             config = json.loads(self.config_path.read_text(encoding="utf-8"))
-            self.current_theme = config.get("theme", "dark")
+        except (OSError, ValueError) as exc:
+            logging.getLogger(__name__).warning(
+                "테마 설정 파일을 읽지 못해 기본 테마로 시작합니다 (%s): %s",
+                self.config_path, exc,
+            )
+            return
+        theme = config.get("theme", "dark")
+        if theme in self.THEMES:
+            self.current_theme = theme
 
     def _save_config(self) -> None:
         """테마 설정 저장."""

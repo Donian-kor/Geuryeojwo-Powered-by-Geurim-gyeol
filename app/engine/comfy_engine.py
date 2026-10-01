@@ -15,12 +15,20 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..comfy import ComfyClient, ComfyUIConfig, ComfyUIError, SystemInfo
+from ..comfy.client import extract_text_outputs
 from ..comfy.workflow import Workflow, infer_parameters, list_workflows, load_workflow
 from .output.manager import OutputManager, OutputMetadata
 from .session.manager import SessionManager, SessionMetadata
 
 # 이미지를 남기는 출력 노드 (앞에서부터 우선)
 _OUTPUT_NODES = ("SaveImage", "PreviewImage", "SaveAnimatedWEBP", "SaveAnimatedPNG")
+# 프롬프트 인핸서 노드로 간주하는 class_type
+_ENHANCER_TYPES = ("PromptEnhance", "PromptEnhancer", "PromptExpander")
+
+
+def _is_enhancer(class_type: str) -> bool:
+    """프롬프트 인핸서 노드인지 판단한다."""
+    return any(marker in class_type for marker in _ENHANCER_TYPES)
 
 
 @dataclass
@@ -40,6 +48,8 @@ class GenerationRequest:
     cfg: float = 7.0
     seed: int = -1
     extra: dict[str, Any] = field(default_factory=dict)
+    # False 면 워크플로의 프롬프트 인핸서 노드를 건너뛴다
+    enhance_prompt: bool = True
 
 
 @dataclass
@@ -291,6 +301,7 @@ class GeurimGyeolEngine:
         cfg: float = 7.0,
         seed: int = -1,
         extra: dict[str, Any] | None = None,
+        enhance_prompt: bool = True,
     ) -> GenerationRequest:
         """현재 선택된 워크플로를 쓰는 생성 요청을 만든다."""
         wf = self.active_workflow
@@ -308,6 +319,7 @@ class GeurimGyeolEngine:
             cfg=cfg,
             seed=seed,
             extra=dict(extra or {}),
+            enhance_prompt=enhance_prompt,
         )
 
     def _payload(self, request: GenerationRequest) -> tuple[Workflow, dict]:
@@ -345,7 +357,80 @@ class GeurimGyeolEngine:
             self.logger.warning(
                 "%s 워크플로에 주입할 수 있는 입력이 없습니다", wf.name
             )
-        return wf, wf.apply(values)
+
+        # 프롬프트 인핸서 우회 (GUI 의 스위치가 꺼져 있으면)
+        payload = wf.apply(values)
+        if not request.enhance_prompt:
+            payload = self._bypass_enhancer(payload)
+        return wf, payload
+
+    def _bypass_enhancer(self, payload: dict) -> dict:
+        """프롬프트 인핸서 노드를 건너뛰도록 payload 를 고친다.
+
+        인핸서 노드(14)의 출력이 TextEncode(4) 로 들어가는 구조라면,
+        인핸서를 끄고 사용자가 입력한 프롬프트를 그대로 TextEncode 에 넣는다.
+
+        TextEncode 쪽 링크만 풀면 안 된다. T8ShowText 같은 출력 노드가
+        ["14", 0] 을 참조하고 있으면 ComfyUI 는 출력 노드로 도달 가능한
+        노드를 실행하므로 LLM 이 여전히 호출된다. 인핸서를 참조하는 모든
+        노드의 연결을 끊고 인핸서 노드 자체를 payload 에서 제거해야 한다.
+
+        Returns:
+            dict: 고쳐진 payload
+        """
+        # 1) TextEncode 로 연결된 프롬프트를 원본 값으로 되돌린다.
+        enhancer_id: str | None = None
+        original_prompt: str | None = None
+        for node_id, node in (payload or {}).items():
+            inputs = node.get("inputs") or {}
+            for input_name in ("prompt", "text", "positive"):
+                source = inputs.get(input_name)
+                if not (isinstance(source, list) and len(source) == 2):
+                    continue
+                src_id = source[0]
+                src_node = payload.get(src_id) or {}
+                if not _is_enhancer(src_node.get("class_type", "")):
+                    continue
+                # 인핸서 노드 자체의 prompt 값이 사용자 원문이다.
+                original = (src_node.get("inputs") or {}).get("prompt")
+                if isinstance(original, str):
+                    inputs[input_name] = original
+                    enhancer_id = src_id
+                    original_prompt = original
+                    break
+            if enhancer_id:
+                break
+
+        if not enhancer_id:
+            return payload
+
+        # 2) 인핸서를 참조하는 다른 노드(T8ShowText 등)의 연결도 끊는다.
+        dangling: list[str] = []
+        for node_id, node in payload.items():
+            if node_id == enhancer_id:
+                continue
+            inputs = node.get("inputs") or {}
+            for input_name, value in list(inputs.items()):
+                if not (isinstance(value, list) and len(value) == 2):
+                    continue
+                if value[0] != enhancer_id:
+                    continue
+                # 문자열 입력은 원본 프롬프트로 대체하고, 나머지는 링크 제거.
+                if input_name in ("prompt", "text", "string", "positive"):
+                    inputs[input_name] = original_prompt
+                else:
+                    del inputs[input_name]
+                dangling.append(f"{node_id}.{input_name}")
+
+        # 3) 인핸서 노드 자체를 제거한다. 그래야 LLM 이 아예 로드되지 않는다.
+        payload.pop(enhancer_id, None)
+
+        self.logger.info(
+            "프롬프트 인핸서(%s)를 실행 그래프에서 제거했습니다 (끊은 입력: %s)",
+            enhancer_id,
+            ", ".join(dangling) if dangling else "없음",
+        )
+        return payload
 
     def generate(
         self,
@@ -387,12 +472,14 @@ class GeurimGyeolEngine:
             self.logger.info("[%s] %s", state, message)
 
         try:
-            images = asyncio.run(
+            # run_details=True 로 실제 사용된 프롬프트와 prompt_id 를 함께 받는다 (B4)
+            images, history, prompt_id = asyncio.run(
                 self.client.run(
                     payload,
                     on_progress=_progress,
                     on_stage=_stage,
                     timeout=self.config.timeout_seconds,
+                    run_details=True,
                 )
             )
         except ComfyUIError as exc:
@@ -411,7 +498,7 @@ class GeurimGyeolEngine:
                 elapsed_seconds=elapsed,
             )
 
-        return self._save(request, wf, payload, images, elapsed)
+        return self._save(request, wf, payload, images, elapsed, history, prompt_id)
 
     def _applied_values(self, wf: Workflow, payload: dict) -> dict[str, Any]:
         """실제로 전송된 payload 에서 메타데이터 값을 읽는다.
@@ -450,6 +537,8 @@ class GeurimGyeolEngine:
         payload: dict,
         images: list[dict],
         elapsed: float,
+        history: dict | None = None,
+        prompt_id: str = "",
     ) -> GenerationResult:
         """ComfyUI 결과를 outputs/ 와 sessions/ 에 저장한다.
 
@@ -479,10 +568,31 @@ class GeurimGyeolEngine:
         # 실제 전송된 값에서 메타데이터를 읽는다
         applied = self._applied_values(wf, payload)
 
+        # 인핸서가 실제로 만든 프롬프트를 history 에서 읽는다 (B4).
+        # 인핸서 노드(14)의 text 출력이 곧 이미지 모델에 들어간 값이다.
+        original_prompt = applied["prompt"] or request.prompt
+        enhanced_prompt = original_prompt
+        if history and prompt_id:
+            texts = extract_text_outputs(history, prompt_id)
+            if texts:
+                # 인핸서 노드가 있으면 그 출력을, 없으면 첫 텍스트를 쓴다
+                for spec in wf.parameters.values():
+                    if spec.input in ("prompt", "text") and spec.node in texts:
+                        enhanced_prompt = texts[spec.node]
+                        break
+                else:
+                    enhanced_prompt = next(iter(texts.values()))
+                if enhanced_prompt != original_prompt:
+                    self.logger.info(
+                        "인핸서가 만든 프롬프트를 기록합니다 (%d 자)",
+                        len(enhanced_prompt),
+                    )
+
         metadata = OutputMetadata(
             seed=applied["seed"],
             model=wf.name,
-            prompt=applied["prompt"],
+            prompt=enhanced_prompt,
+            original_prompt=original_prompt,
             negative_prompt=applied["negative"],
             width=applied["width"],
             height=applied["height"],
@@ -510,8 +620,8 @@ class GeurimGyeolEngine:
         # 2) sessions/ 에 기록
         try:
             session_meta = SessionMetadata(
-                original_prompt=applied["prompt"] or request.prompt,
-                enhanced_prompt=applied["prompt"],
+                original_prompt=original_prompt,
+                enhanced_prompt=enhanced_prompt,
                 negative_prompt=applied["negative"],
                 llm_model=None,
                 image_model=wf.name,

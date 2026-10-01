@@ -13,9 +13,10 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from app.engine.comfy_engine import GeurimGyeolEngine
+from app.engine.comfy_engine import GeurimGyeolEngine, _is_enhancer
 from app.comfy.client import SystemInfo
 from app.comfy.config import ComfyUIConfig
+from app.comfy.workflow import infer_parameters
 
 
 def _png_bytes(size=(64, 64), color=(200, 30, 30)) -> bytes:
@@ -23,6 +24,38 @@ def _png_bytes(size=(64, 64), color=(200, 30, 30)) -> bytes:
     buf = io.BytesIO()
     Image.new("RGB", size, color).save(buf, format="PNG")
     return buf.getvalue()
+
+
+# --- 인핸서 / LoRA 인식 회귀 테스트 ------------------------------
+# 근거: 인핸서 노드(QwenImage21PromptEnhancerT8)에는 이름에 TextEncode 가
+# 없고, 인핸서에도 seed 가 있어 KSampler 와 구분해야 한다.
+
+_ENHANCER_WORKFLOW = {
+    "1": {"class_type": "UNETLoader",
+          "inputs": {"unet_name": "u.safetensors", "weight_dtype": "default"}},
+    "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": "c.safetensors"}},
+    "3": {"class_type": "VAELoader", "inputs": {"vae_name": "v.safetensors"}},
+    "4": {"class_type": "TextEncodeQwenImage21", "inputs": {
+        "prompt": ["14", 0], "negative_prompt": "NEG", "resolution": 1024,
+        "clip": ["2", 0]}},
+    "5": {"class_type": "EmptyLatentImage",
+          "inputs": {"width": 704, "height": 1024, "batch_size": 1}},
+    "6": {"class_type": "KSampler", "inputs": {
+        "seed": 137011622967013, "steps": 40, "cfg": 3,
+        "sampler_name": "euler", "scheduler": "simple", "denoise": 1,
+        "model": ["16", 0], "positive": ["4", 0],
+        "negative": ["4", 1], "latent_image": ["5", 0]}},
+    "7": {"class_type": "VAEDecode", "inputs": {"samples": ["6", 0], "vae": ["3", 0]}},
+    "8": {"class_type": "SaveImage",
+          "inputs": {"filename_prefix": "p", "images": ["7", 0]}},
+    "14": {"class_type": "QwenImage21PromptEnhancerT8", "inputs": {
+        "prompt": "", "input_mode": "텍스트-이미지", "max_output_chars": 0,
+        "wh_ratio": "9:16", "seed": 607952190216878,
+        "local_model": "pe.gguf"}},
+    "15": {"class_type": "T8ShowText", "inputs": {"text": ["14", 0]}},
+    "16": {"class_type": "LoraLoaderModelOnly", "inputs": {
+        "lora_name": "l.safetensors", "strength_model": 1, "model": ["1", 0]}},
+}
 
 
 @pytest.fixture
@@ -57,6 +90,39 @@ def workflow_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def enhancer_engine(tmp_path: Path, monkeypatch):
+    """인핸서 + LoRA 워크플로를 가진 엔진.
+
+    workflow_dir 픽스처를 재사용하지 않는다 — 기존 테스트가
+    '워크플로가 하나뿐' 이라고 전제하기 때문이다.
+    """
+
+    async def _offline(self):
+        raise AssertionError("테스트가 네트워크를 호출했습니다")
+
+    monkeypatch.setattr(
+        "app.comfy.client.ComfyClient.get_system_info", _offline, raising=True
+    )
+    monkeypatch.setattr("app.comfy.client.ComfyClient.run", _offline, raising=True)
+
+    root = tmp_path / "enhancer_root"
+    wf_dir = root / "workflows"
+    wf_dir.mkdir(parents=True)
+    for name in ("config", "outputs", "sessions"):
+        (root / name).mkdir(parents=True, exist_ok=True)
+    (wf_dir / "enhancer-wf.json").write_text(
+        json.dumps({"name": "인핸서 워크플로", "prompt": _ENHANCER_WORKFLOW}),
+        encoding="utf-8",
+    )
+
+    eng = GeurimGyeolEngine(root)
+    eng.refresh_workflows()
+    eng.select_workflow("enhancer-wf")
+    eng.system_info = SystemInfo(online=False, error="테스트 중 (오프라인)")
+    return eng
+
+
+@pytest.fixture
 def engine(workflow_dir: Path, monkeypatch):
     """오프라인 엔진 — 네트워크를 결코 건드리지 않는다.
 
@@ -83,7 +149,7 @@ def engine(workflow_dir: Path, monkeypatch):
 @pytest.fixture
 def fake_comfy(monkeypatch):
     """ComfyUI 응답을 대체한다. online=True 로 고정."""
-    state = {"images": [], "run_error": None}
+    state = {"images": [], "run_error": None, "history": {}}
 
     async def fake_get_system_info(self):
         return SystemInfo(
@@ -91,12 +157,17 @@ def fake_comfy(monkeypatch):
             vram_total_gb=8.0, vram_free_gb=4.0,
         )
 
-    async def fake_run(self, payload, on_progress=None, on_stage=None, timeout=None):
+    async def fake_run(
+        self, payload, on_progress=None, on_stage=None, timeout=None,
+        run_details=False,
+    ):
         if state["run_error"]:
             raise state["run_error"]
         if on_progress:
             on_progress(5, "제출 완료")
             on_progress(100, "완료")
+        if run_details:
+            return state["images"], state["history"], "p-test"
         return state["images"]
 
     async def fake_get_image(self, filename, subfolder="", **kw):
@@ -494,6 +565,205 @@ def test_refresh_status_launches_when_configured(workflow_dir, monkeypatch):
     assert info.online is True
     assert launched, "launch 가 호출되어야 한다"
     eng.stop_launched()
+def test_prompt_targets_enhancer_node_not_linked_node():
+    """프롬프트는 인핸서(문자열 입력)에 들어가야 한다.
+
+    회귀 근거: TextEncode(4)의 prompt 는 ["14", 0] 링크라 값을 넣어도
+    효과가 없고, 인핸서(14)의 문자열 prompt 여야 LLM 이 받는다.
+    """
+    specs = infer_parameters(_ENHANCER_WORKFLOW)
+    assert "positive" in specs
+    positive = specs["positive"]
+    assert positive.node == "14"
+    assert positive.input == "prompt"
+    # TextEncode(4) 의 prompt 는 ["14", 0] 링크라 값을 넣어도 효과가 없다
+    assert isinstance(_ENHANCER_WORKFLOW["4"]["inputs"]["prompt"], list)
+
+
+def test_seed_comes_from_ksampler_not_enhancer():
+    """seed 는 KSampler 것만 조작 대상이다.
+
+    회귀 근거: 인핸서(14)에도 seed 가 있어 잘못 잡으면 재현성이 깨진다.
+    """
+    specs = infer_parameters(_ENHANCER_WORKFLOW)
+    assert specs["seed"].node == "6"
+    for sampler_input in ("steps", "cfg", "denoise",
+                          "sampler_name", "scheduler"):
+        assert specs[sampler_input].node == "6", sampler_input
+
+
+def _select_enhancer(engine) -> None:
+    """인핸서 워크플로를 이름으로 선택한다 (파일 나열 순서 의존 제거)."""
+    engine.select_workflow("enhancer-wf")
+
+
+def test_extract_text_outputs_reads_enhancer_result():
+    """history 에서 인핸서 노드의 텍스트 출력을 읽는다 (B4).
+
+    실측 구조: GET /history/{id} → {prompt_id: {outputs: {노드id: {...}}}}
+    T8ShowText 는 {"text": "다듬어진 프롬프트"} 를 남긴다.
+    """
+    from app.comfy.client import extract_text_outputs
+
+    history = {
+        "p-1": {"outputs": {
+            "8": {"images": [{"filename": "a.png"}]},
+            "14": {"text": ["고양이 한 마리가 나무 테이블에 앉아 있고, "
+                            "햇살이 비스듬히 들어온다, 고양이, 4k"]},
+        }}
+    }
+    texts = extract_text_outputs(history, "p-1")
+    assert texts["14"].startswith("고양이 한 마리가")
+    assert "8" not in texts, "이미지 노드는 텍스트 출력이 아니다"
+
+
+def test_metadata_records_original_and_enhanced_prompt_separately(tmp_path):
+    """원본 프롬프트와 최종 프롬프트가 구분되어 저장된다 (§12 시드 재현성).
+
+    회귀: 둘 다 원문이라 기록된 값으로 같은 그림을 다시 만들 수 없었다.
+    """
+    import json as _json
+
+    from app.engine.output.manager import OutputMetadata
+
+    meta = OutputMetadata(
+        seed=42, model="wf", prompt="최종 다듬어진 프롬프트",
+        original_prompt="고양이", negative_prompt="", width=8, height=8,
+        steps=4, cfg=4.0,
+    )
+    data = meta.to_dict()
+    assert data["prompt"] == "최종 다듬어진 프롬프트"
+    assert data["original_prompt"] == "고양이"
+
+    roundtrip = OutputMetadata.from_dict(_json.loads(_json.dumps(data, ensure_ascii=False)))
+    assert roundtrip.prompt == "최종 다듬어진 프롬프트"
+    assert roundtrip.original_prompt == "고양이"
+
+
+def test_bypass_removes_enhancer_node_and_all_references(enhancer_engine):
+    """인핸서 OFF 시 노드 14 가 payload 에서 사라지고 참조도 모두 끊긴다.
+
+    회귀: TextEncode(4) 의 링크만 풀면 T8ShowText(15) 가 ["14", 0] 을
+    계속 참조해 ComfyUI 가 LLM 을 실행한다.
+    """
+    engine = enhancer_engine
+    request = engine.build_request(
+        prompt="고양이", negative_prompt="흐릿",
+        width=640, height=480, steps=8, cfg=4.0, seed=7,
+        enhance_prompt=False,
+    )
+    _, payload = engine._payload(request)
+
+    assert "14" not in payload, "인핸서 노드가 payload 에 남아 있다"
+
+    # 어떤 노드도 인핸서를 참조하지 않아야 한다 (dangling link 금지)
+    for node_id, node in payload.items():
+        for input_name, value in (node.get("inputs") or {}).items():
+            if isinstance(value, list) and len(value) == 2:
+                assert value[0] != "14", (
+                    f"노드 {node_id}.{input_name} 이 제거된 인핸서를 참조한다"
+                )
+
+    # TextEncode 는 원본 프롬프트를 직접 받아야 한다
+    assert payload["4"]["inputs"]["prompt"] == "고양이"
+
+
+def test_bypass_does_not_accumulate_state_in_workflow(enhancer_engine):
+    """생성할 때마다 워크플로 객체에 상태가 쌓이지 않는다.
+
+    회귀: wf.meta.setdefault(...).append(...) 는 wf 가 재사용되므로
+    3회 실행 → ['14','14','14'] 이 남았다.
+    """
+    engine = enhancer_engine
+    request = engine.build_request(
+        prompt="p", width=64, height=64, steps=4, cfg=4.0, seed=1,
+        enhance_prompt=False,
+    )
+    for _ in range(3):
+        _, payload = engine._payload(request)
+        assert "14" not in payload
+
+    assert engine.active_workflow.meta == {}, (
+        f"우회 사실이 워크플로에 누적된다: {engine.active_workflow.meta}"
+    )
+
+
+def test_system_info_describe_survives_missing_vram_free():
+    """vram_total_gb 은 있고 vram_free_gb 이 None 이어도 예외가 나지 않는다.
+
+    회귀: `f"{self.vram_used_gb:.1f}"` 로 None 을 포맷하면
+    TypeError: unsupported format string passed to 'NoneType'
+    """
+    from app.comfy.client import SystemInfo
+
+    info = SystemInfo(
+        online=True,
+        comfyui_version="0.3.40",
+        device_name="NVIDIA GeForce RTX 5080",
+        vram_total_gb=16.0,
+        vram_free_gb=None,
+    )
+    assert info.vram_used_gb is None, "free 가 없으면 used 도 None 이어야 한다"
+    assert "VRAM 없음" in info.describe()
+
+    info.vram_free_gb = 8.0
+    assert "8.0/16.0GB" in info.describe()
+
+
+def test_vram_labels_handle_partial_system_stats():
+    """상태 표시가 free 누락 상태에서도 문자열을 만든다 (GUI 스레드 1초 타이머)."""
+    from app.comfy.client import SystemInfo
+
+    # GUI 를 띄우지 않고 상태 표시가 쓰는 포맷 경로만 확인한다.
+    info = SystemInfo(online=True, vram_total_gb=24.0, vram_free_gb=None)
+    used = info.vram_used_gb
+    text = (
+        f"VRAM: {used:.1f}/{info.vram_total_gb:.1f}GB"
+        if used is not None
+        else "VRAM: -"
+    )
+    assert text == "VRAM: -"
+
+
+def test_enhancer_is_detected_and_bypass_rewires_prompt(enhancer_engine):
+    """인핸서 스위치를 끄면 TextEncode 에 원본 프롬프트가 직접 들어간다."""
+    assert _is_enhancer("QwenImage21PromptEnhancerT8")
+    assert not _is_enhancer("TextEncodeQwenImage21")
+
+    engine = enhancer_engine
+    request = engine.build_request(
+        prompt="고양이", negative_prompt="흐릿",
+        width=640, height=480, steps=8, cfg=4.0, seed=999,
+        enhance_prompt=True,
+    )
+    _, on = engine._payload(request)
+    assert on["14"]["inputs"]["prompt"] == "고양이"
+    assert on["4"]["inputs"]["prompt"] == ["14", 0]
+
+    request.enhance_prompt = False
+    _, off = engine._payload(request)
+    assert off["4"]["inputs"]["prompt"] == "고양이", "우회하면 링크가 풀려야 한다"
+
+
+def test_lora_strength_is_injectable_as_float(enhancer_engine):
+    """LoRA 강도(float)가 워크플로에 그대로 주입된다."""
+    engine = enhancer_engine
+    request = engine.build_request(
+        prompt="p", width=640, height=480, steps=8, cfg=4.0, seed=1,
+        extra={"strength_model": 0.65},
+    )
+    _, payload = engine._payload(request)
+    value = payload["16"]["inputs"]["strength_model"]
+    assert value == pytest.approx(0.65)
+
+
+def test_model_selectors_are_inferred_for_all_loaders():
+    """모델 선택 드롭다운용 파라미터가 로더 노드에서 인식된다."""
+    specs = infer_parameters(_ENHANCER_WORKFLOW)
+    assert specs["unet"].kind == "model:diffusion_models"
+    assert specs["clip"].kind == "model:text_encoders"
+    assert specs["vae"].kind == "model:vae"
+    assert specs["lora"].kind == "model:loras"
 
 
 def test_refresh_status_does_not_launch_when_disabled(
