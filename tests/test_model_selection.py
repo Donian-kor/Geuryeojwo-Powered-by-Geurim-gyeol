@@ -20,6 +20,7 @@ pytest.importorskip("PySide6")
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QMessageBox
 
+from app.comfy.client import ComfyClient, SystemInfo
 from app.engine.comfy_engine import GeurimGyeolEngine
 
 # ComfyUI 에 "설치되어 있는" 모델 목록 (테스트 전용 가짜 응답)
@@ -80,6 +81,21 @@ def make_window(qapp, tmp_path, monkeypatch, project_root):
         )
 
         # ComfyUI 목록과 접속 상태를 통제한다 (실제 서버 불필요)
+        async def _fake_system_info(self):
+            return SystemInfo(
+                online=True,
+                comfyui_version="0.0.0-test",
+                device_name="TEST GPU",
+                vram_total_gb=8.0,
+                vram_free_gb=4.0,
+            )
+
+        # get_system_info 를 막지 않으면 MainWindow 가 실제 서버에
+        # 접속하려 시도한다. ComfyUI 가 꺼져 있으면 테스트가 수십 초
+        # 걸리고, 켜져 있는지에 따라 결과가 달라진다.
+        monkeypatch.setattr(
+            ComfyClient, "get_system_info", _fake_system_info
+        )
         monkeypatch.setattr(
             GeurimGyeolEngine, "model_options",
             lambda self: dict(FAKE_OPTIONS),
