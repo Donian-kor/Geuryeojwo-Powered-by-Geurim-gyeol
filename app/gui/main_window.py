@@ -143,10 +143,21 @@ class MainWindow(QWidget):
         top.addWidget(self.status_refresh); top.addWidget(self.theme_toggle)
         root.addLayout(top)
 
-        # ComfyUI 접속 실패 경고가 있을 때만 표시
+        # ComfyUI 오프라인 안내 (자동 실행 켜져 있으면 다른 문구를 쓴다)
         if not self.engine.online:
-            warn=QLabel("⚠ ComfyUI 서버에 접속할 수 없습니다. "
-                        "ComfyUI를 실행한 뒤 '상태 새로고침'을 눌러주세요.")
+            if self.engine.config.auto_launch:
+                warn_text = (
+                    "⚠ ComfyUI 에 접속할 수 없어 자동으로 실행을 시도했습니다. "
+                    f"사유: {self.engine.system_info.error or '알 수 없음'}\n"
+                    "'상태 새로고침'을 누르면 다시 시도합니다."
+                )
+            else:
+                warn_text = (
+                    "⚠ ComfyUI 서버에 접속할 수 없습니다. "
+                    "ComfyUI를 실행한 뒤 '상태 새로고침'을 눌러주세요.\n"
+                    "config/comfyui.json 의 auto_launch 를 켜면 자동으로 실행합니다."
+                )
+            warn=QLabel(warn_text)
             warn.setWordWrap(True); warn.setStyleSheet("color:#ffd93d; font-size:12px;")
             root.addWidget(warn)
 
@@ -192,7 +203,8 @@ class MainWindow(QWidget):
         self.prompt.setMinimumHeight(90); pl.addWidget(self.prompt)
         left.addWidget(promptbox)
 
-        params=QGroupBox("Generation"); pf=QHBoxLayout(params); pf.setSpacing(4)
+        params=QGroupBox("Generation"); pv=QVBoxLayout(params); pv.setSpacing(4)
+        pf=QHBoxLayout(); pf.setSpacing(4)
         self.w=QSpinBox(); self.w.setRange(64,4096); self.w.setValue(1024); self.w.setSingleStep(64)
         self.h=QSpinBox(); self.h.setRange(64,4096); self.h.setValue(1024); self.h.setSingleStep(64)
         self.steps=QSpinBox(); self.steps.setRange(1,100); self.steps.setValue(20)
@@ -207,6 +219,15 @@ class MainWindow(QWidget):
 
         for cap, wdg in (("W",self.w),("H",self.h),("Steps",self.steps),("CFG",self.cfg),("Seed",self.seed)):
             pf.addLayout(_field(cap,wdg))
+        pv.addLayout(pf)
+
+        # Sampler / Scheduler — ComfyUI 가 목록을 알려준다 (KSampler 기준)
+        self.sampler=QComboBox(); self.sampler.setMinimumWidth(120)
+        self.scheduler=QComboBox(); self.scheduler.setMinimumWidth(120)
+        sampler_row=QHBoxLayout(); sampler_row.setSpacing(4)
+        sampler_row.addWidget(QLabel("Sampler")); sampler_row.addWidget(self.sampler,1)
+        sampler_row.addWidget(QLabel("Scheduler")); sampler_row.addWidget(self.scheduler,1)
+        pv.addLayout(sampler_row)
         left.addWidget(params)
 
         self.neg=QTextEdit(); self.neg.setPlaceholderText("Negative prompt (선택)")
@@ -303,8 +324,24 @@ class MainWindow(QWidget):
         self.status.setText("세션에서 재생성할 파라미터가 설정되었습니다. 그려줘를 눌러주세요.")
 
     def refresh_models(self):
-        """ComfyUI 상태와 workflows/ 목록을 갱신한다 (v0.2 §11)."""
-        self.engine.refresh_status()
+        """ComfyUI 상태와 workflows/ 목록을 갱신한다.
+
+        ComfyUI 가 꺼져 있고 자동 실행이 켜져 있으면, 실행에 시간이
+        걸리므로 먼저 버튼을 비활성화하고 대기 안내를 띄운다.
+        """
+        auto = self.engine.config.auto_launch
+        offline = not self.engine.online
+
+        if auto and offline:
+            self.status_refresh.setEnabled(False)
+            self.status.setText("ComfyUI 를 실행하는 중입니다. 잠시만 기다려주세요...")
+            QApplication.processEvents()
+
+        try:
+            self.engine.refresh_status()
+        finally:
+            self.status_refresh.setEnabled(True)
+
         self.comfy_label.setText(self.engine.status_text())
         self.comfy_label.setStyleSheet(
             "color:#7fb3ff;" if self.engine.online else "color:#d9534f;"
@@ -355,9 +392,58 @@ class MainWindow(QWidget):
             self.steps.setValue(defaults["steps"])
         if "cfg" in params and isinstance(defaults.get("cfg"), (int, float)):
             self.cfg.setValue(float(defaults["cfg"]))
+        self._setup_sampler(params, defaults)
         self.status.setText(
             f"{wf.name} · 파라미터 {len(params)}개 사용 가능"
         )
+
+    def _setup_sampler(self, params: dict, defaults: dict) -> None:
+        """Sampler / Scheduler 드롭다운을 워크플로에 맞춘다.
+
+        파라미터 키 이름은 워크플로마다 다르다
+        (예: "sampler" 또는 "sampler_name").
+        그래서 키가 아니라 실제 ComfyUI 입력 이름(spec.input)으로 판단한다.
+
+        ComfyUI 에서 KSampler 선택지를 받아오지만, 워크플로가 KSampler 계열
+        노드를 쓰지 않으면 선택지가 없을 수 있으므로 그때는 워크플로
+        기본값만으로 채운다.
+        """
+        # 워크플로 입력 이름 -> ParameterSpec
+        by_input = {spec.input: key for key, spec in params.items()}
+        sampler_key = by_input.get("sampler_name")
+        scheduler_key = by_input.get("scheduler")
+
+        if sampler_key or scheduler_key:
+            options = self.engine.sampler_options()
+        else:
+            options = {}
+
+        for combo, key, option_key in (
+            (self.sampler, sampler_key, "sampler"),
+            (self.scheduler, scheduler_key, "scheduler"),
+        ):
+            combo.blockSignals(True)
+            combo.clear()
+            enabled = key is not None
+            combo.setEnabled(enabled)
+            if not enabled:
+                combo.addItem("(사용 안 함)")
+                combo.blockSignals(False)
+                continue
+
+            current = defaults.get(key)
+            items = list(options.get(option_key) or [])
+            # ComfyUI 응답이 없으면 워크플로 기본값만 넣는다
+            if not items:
+                items = [current] if current else []
+            for item in items:
+                combo.addItem(item)
+
+            if current:
+                index = combo.findText(str(current))
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+            combo.blockSignals(False)
 
     def start(self):
         """생성을 시작한다."""
@@ -381,6 +467,7 @@ class MainWindow(QWidget):
                 width=self.w.value(), height=self.h.value(),
                 steps=self.steps.value(), cfg=self.cfg.value(),
                 seed=self.seed.value(),
+                extra=self._collect_extra(),
             )
         except RuntimeError as exc:
             self.generate.setEnabled(True)
@@ -391,6 +478,29 @@ class MainWindow(QWidget):
         self.worker.done.connect(self.done)
         self.worker.failed.connect(self.fail)
         self.worker.start()
+
+    def _collect_extra(self) -> dict:
+        """워크플로에 선택적 파라미터 값을 모아서 반환한다.
+
+        키는 워크플로의 parameters 맵에 있는 이름이어야 한다
+        (워크플로마다 "sampler" 또는 "sampler_name" 처럼 다를 수 있다).
+        비활성화된 항목은 보내지 않는다 — 그래야 워크플로 기본값이 유지된다.
+        """
+        params = (self.engine.active_workflow.parameters
+                  if self.engine.active_workflow else {})
+        # ComfyUI 입력 이름 -> 파라미터 키
+        by_input = {spec.input: key for key, spec in params.items()}
+
+        extra: dict = {}
+        if self.sampler.isEnabled():
+            key = by_input.get("sampler_name")
+            if key and self.sampler.currentText():
+                extra[key] = self.sampler.currentText()
+        if self.scheduler.isEnabled():
+            key = by_input.get("scheduler")
+            if key and self.scheduler.currentText():
+                extra[key] = self.scheduler.currentText()
+        return extra
 
     def _on_progress(self, percent, message):
         """진행률 콜백 (Worker 스레드에서 호출)."""

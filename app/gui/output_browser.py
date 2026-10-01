@@ -12,7 +12,7 @@ from app.engine.output.manager import OutputManager, OutputMetadata
 
 
 class OutputBrowser(QWidget):
-    """Output Browser 위젯 (v0.1 §23).
+    """Output Browser 위젯.
 
     outputs/YYYY-MM-DD/ 구조의 이미지를 브라우징한다.
     - 자동 파일명 기록 확인

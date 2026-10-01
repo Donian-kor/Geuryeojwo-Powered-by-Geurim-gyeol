@@ -25,9 +25,9 @@ _OUTPUT_NODES = ("SaveImage", "PreviewImage", "SaveAnimatedWEBP", "SaveAnimatedP
 
 @dataclass
 class GenerationRequest:
-    """생성 요청 (v0.2).
+    """생성 요청.
 
-    v0.1 의 llm_path/image_path 대신 워크플로와 파라미터를 받는다.
+    워크플로와 파라미터를 받는다.
     모델 교체는 워크플로 파라미터로 이루어진다.
     """
 
@@ -75,6 +75,9 @@ class GeurimGyeolEngine:
         self.outputs = OutputManager(self.root / "outputs")
         self.sessions = SessionManager(self.root / "sessions")
 
+        # 이 프로그램이 직접 띄운 ComfyUI 프로세스 (자동 실행 시에만 채워짐)
+        self._launched_process = None
+
     # --- 생명주기 ---------------------------------------------------
 
     def initialize(self) -> None:
@@ -83,7 +86,8 @@ class GeurimGyeolEngine:
         self.refresh_status()
 
     def shutdown(self) -> None:
-        """열린 HTTP 연결을 닫는다."""
+        """열린 HTTP 연결을 닫고, 띄운 ComfyUI 가 있으면 종료한다."""
+        self.stop_launched()
         try:
             asyncio.run(self.client.close())
         except Exception:
@@ -91,13 +95,83 @@ class GeurimGyeolEngine:
 
     # --- ComfyUI 상태 -----------------------------------------------
 
-    def refresh_status(self) -> SystemInfo:
-        """ComfyUI 서버 상태를 갱신한다."""
+    def refresh_status(self, allow_launch: bool = True) -> SystemInfo:
+        """ComfyUI 서버 상태를 갱신한다.
+
+        접속에 실패했고 설정에서 자동 실행이 켜져 있으면
+        ComfyUI 를 띄운 뒤 응답이 올라올 때까지 기다린다.
+
+        Args:
+            allow_launch: True 면 필요할 때 ComfyUI 를 실행한다.
+        """
         try:
             self.system_info = asyncio.run(self.client.get_system_info())
         except Exception as exc:
             self.system_info = SystemInfo(online=False, error=str(exc))
+
+        if not self.system_info.online and allow_launch:
+            self.system_info = self._try_launch()
+
         return self.system_info
+
+    def _try_launch(self) -> SystemInfo:
+        """ComfyUI 를 자동 실행하고 응답을 기다린다."""
+        if not self.config.auto_launch:
+            return self.system_info
+
+        self.logger.info("ComfyUI 접속 실패 — 자동 실행을 시도합니다.")
+        proc = self.config.launch(self.logger)
+        if proc is None:
+            self.logger.warning(
+                "ComfyUI 자동 실행에 실패했습니다. config/comfyui.json 의 "
+                "launch_command 와 launch_working_dir 를 확인해주세요."
+            )
+            return SystemInfo(
+                online=False,
+                error="자동 실행 실패 — 설정의 launch_command 를 확인해주세요",
+            )
+
+        # 우리가 띄운 서버만 종료할 수 있도록 기억한다
+        self._launched_process = proc
+
+        deadline = time.monotonic() + self.config.launch_wait_seconds
+        while time.monotonic() < deadline:
+            # 사용자가 중간에 끄면 바로 포기한다
+            if proc.poll() is not None:
+                self.logger.error(
+                    "ComfyUI 가 시작 도중 종료되었습니다 (코드 %s).", proc.returncode
+                )
+                return SystemInfo(
+                    online=False, error="ComfyUI 시작 실패 (프로세스 종료)"
+                )
+            try:
+                info = asyncio.run(self.client.get_system_info())
+            except Exception:
+                info = SystemInfo(online=False)
+            if info.online:
+                self.logger.info("ComfyUI 자동 실행 완료")
+                return info
+            time.sleep(1.5)
+
+        self.logger.error(
+            "ComfyUI 가 %d초 안에 응답하지 않았습니다.",
+            self.config.launch_wait_seconds,
+        )
+        return SystemInfo(online=False, error="ComfyUI 응답 시간 초과")
+
+    def stop_launched(self) -> None:
+        """자동 실행한 ComfyUI 를 종료한다.
+
+        이 프로그램이 띄운 서버만 종료하며, 사용자가 직접 실행한
+        ComfyUI 는 건드리지 않는다.
+        """
+        proc = self._launched_process
+        if proc is None or proc.poll() is not None:
+            self._launched_process = None
+            return
+        self.logger.info("내가 실행한 ComfyUI 를 종료합니다 (pid=%s).", proc.pid)
+        proc.terminate()
+        self._launched_process = None
 
     @property
     def online(self) -> bool:
@@ -310,16 +384,52 @@ class GeurimGyeolEngine:
                 elapsed_seconds=elapsed,
             )
 
-        return self._save(request, wf, images, elapsed)
+        return self._save(request, wf, payload, images, elapsed)
+
+    def _applied_values(self, wf: Workflow, payload: dict) -> dict[str, Any]:
+        """실제로 전송된 payload 에서 메타데이터 값을 읽는다.
+
+        parameters 맵의 키 이름은 워크플로마다 다르므로
+        spec.input (ComfyUI 입력 이름) 을 기준으로 찾는다.
+        """
+        values: dict[str, Any] = {
+            "seed": 0, "prompt": "", "negative": "",
+            "width": 0, "height": 0, "steps": 0, "cfg": 0.0,
+            "sampler": "", "scheduler": "",
+        }
+        fields = {
+            "seed": "seed", "prompt": "prompt", "text": "prompt",
+            "negative_prompt": "negative",
+            "width": "width", "height": "height", "steps": "steps",
+            "cfg": "cfg", "sampler_name": "sampler", "scheduler": "scheduler",
+        }
+        for spec in wf.parameters.values():
+            field = fields.get(spec.input)
+            if field is None:
+                continue
+            node = payload.get(spec.node) or {}
+            raw = (node.get("inputs") or {}).get(spec.input)
+            # 링크로 연결된 값은 실제 값이 아니라 참조이므로 건너뛴다
+            if isinstance(raw, list):
+                continue
+            if raw is not None:
+                values[field] = raw
+        return values
 
     def _save(
         self,
         request: GenerationRequest,
         wf: Workflow,
+        payload: dict,
         images: list[dict],
         elapsed: float,
     ) -> GenerationResult:
-        """ComfyUI 결과를 outputs/ 와 sessions/ 에 저장한다."""
+        """ComfyUI 결과를 outputs/ 와 sessions/ 에 저장한다.
+
+        metadata 는 요청값이 아니라 실제 전송된 payload 에서 읽는다.
+        (seed 를 -1 로 보내면 ComfyUI 가 임의 배정하고, 워크플로 기본값이
+        그대로 사용될 수도 있으므로 요청과 실제 값이 다를 수 있다)
+        """
         from io import BytesIO
 
         from PIL import Image
@@ -339,18 +449,20 @@ class GeurimGyeolEngine:
                 success=False, error=f"결과 이미지 다운로드 실패: {exc}"
             )
 
-        # 적용된 seed 를 결정한다 (-1 이면 ComfyUI가 임의 배정한 값)
-        seed = request.seed if isinstance(request.seed, int) and request.seed >= 0 else 0
+        # 실제 전송된 값에서 메타데이터를 읽는다
+        applied = self._applied_values(wf, payload)
 
         metadata = OutputMetadata(
-            seed=seed,
+            seed=applied["seed"],
             model=wf.name,
-            prompt=request.prompt,
-            negative_prompt=request.negative_prompt,
-            width=request.width,
-            height=request.height,
-            steps=request.steps,
-            cfg=request.cfg,
+            prompt=applied["prompt"],
+            negative_prompt=applied["negative"],
+            width=applied["width"],
+            height=applied["height"],
+            steps=applied["steps"],
+            cfg=applied["cfg"],
+            sampler=applied["sampler"],
+            scheduler=applied["scheduler"],
             elapsed_seconds=round(elapsed, 2),
         )
 
@@ -371,16 +483,18 @@ class GeurimGyeolEngine:
         # 2) sessions/ 에 기록
         try:
             session_meta = SessionMetadata(
-                original_prompt=request.prompt,
-                enhanced_prompt=request.prompt,
-                negative_prompt=request.negative_prompt,
+                original_prompt=applied["prompt"] or request.prompt,
+                enhanced_prompt=applied["prompt"],
+                negative_prompt=applied["negative"],
                 llm_model=None,
                 image_model=wf.name,
-                seed=seed,
-                width=request.width,
-                height=request.height,
-                steps=request.steps,
-                cfg=request.cfg,
+                seed=applied["seed"],
+                width=applied["width"],
+                height=applied["height"],
+                steps=applied["steps"],
+                cfg=applied["cfg"],
+                sampler=applied["sampler"],
+                scheduler=applied["scheduler"],
                 generation_time=round(elapsed, 2),
                 images=[],
             )

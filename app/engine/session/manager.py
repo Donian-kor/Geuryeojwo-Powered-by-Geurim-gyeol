@@ -8,7 +8,10 @@ from pathlib import Path
 
 @dataclass
 class SessionMetadata:
-    """Session 메타데이터 (v0.1 §21 Session Metadata)."""
+    """Session 메타데이터.
+
+    생성 이력을 되짚을 수 있도록 원본 프롬프트와 사용된 파라미터를 기록한다.
+    """
 
     original_prompt: str
     enhanced_prompt: str
@@ -67,7 +70,7 @@ class SessionMetadata:
 
 
 class SessionManager:
-    """Session CRUD 및 메타데이터 관리 (v0.1 §21, PHASE 9).
+    """Session CRUD 및 메타데이터 관리.
 
     구조:
         sessions/
@@ -140,7 +143,7 @@ class SessionManager:
         image_path: Path,
         image_number: int,
     ) -> list[Path]:
-        """세션에 이미지 생성 결과를 추가한다 (v0.1 §21).
+        """세션에 이미지 생성 결과를 추가한다.
 
         이미지와 메타데이터 JSON을 세션 디렉토리로 복사하고,
         복사된 파일 경로 리스트를 반환한다.

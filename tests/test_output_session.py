@@ -1,4 +1,7 @@
-"""Session / Output 저장 테스트 (v0.1 §21~§23, §36 Data Test)."""
+"""Session / Output 저장 테스트.
+
+    네트워크나 ComfyUI 없이 순수 파일 I/O만 검증한다.
+    """
 import json
 from pathlib import Path
 
@@ -20,7 +23,7 @@ class FakeImage:
 
 
 def test_output_save_creates_png_and_json(tmp_path):
-    """PNG와 JSON이 함께 저장된다 (v0.1 §23)."""
+    """PNG와 JSON이 함께 저장된다."""
     manager = OutputManager(tmp_path)
     meta = OutputMetadata(
         seed=1234, model="sdxl", prompt="a cat", negative_prompt="blurry",
@@ -59,7 +62,7 @@ def test_output_delete_removes_both_files(tmp_path):
 
 
 def test_session_stores_required_metadata(tmp_path):
-    """§21의 Session metadata 필드를 모두 기록한다."""
+    """Session metadata 필드를 모두 기록한다."""
     manager = SessionManager(tmp_path)
     meta = SessionMetadata(
         original_prompt="원본", enhanced_prompt="enhanced",
@@ -76,7 +79,7 @@ def test_session_stores_required_metadata(tmp_path):
 
 
 def test_session_copies_image_files(tmp_path):
-    """세션 폴더에 이미지와 JSON이 실제 저장된다 (v0.1 §21)."""
+    """세션 폴더에 이미지와 JSON이 실제 저장된다."""
     outputs = tmp_path / "outputs"
     outputs.mkdir()
     output_manager = OutputManager(outputs)

@@ -52,6 +52,34 @@ python main.py --listen 8188
 ComfyUI 가 꺼져 있으면 상단에 경고 배너가 뜹니다.
 실행한 뒤 `상태 새로고침` 을 누르면 다시 확인합니다.
 
+### 자동 실행 (선택)
+
+매번 ComfyUI 를 먼저 여는 대신, 이 프로그램이 자동으로 띄우게 할 수 있습니다.
+
+```json
+{
+  "auto_launch": true,
+  "launch_command": "C:\\ComfyUI\\venv\\Scripts\\python.exe main.py",
+  "launch_working_dir": "C:\\ComfyUI",
+  "launch_wait_seconds": 90
+}
+```
+
+| 항목 | 설명 |
+|---|---|
+| `launch_command` | 실행할 명령. `--api` 와 `--port` 는 자동으로 붙습니다 |
+| `launch_working_dir` | 실행 폴더. ComfyUI 폴더를 지정하세요 |
+| `launch_wait_seconds` | 응답을 기다리는 초. 기본 90초 |
+
+**경로에 공백이 있으면 그 부분만 따옴표로 감싸세요.**
+
+```json
+"launch_command": "\"C:\\Program Files\\ComfyUI\\python.exe\" main.py"
+```
+
+이 프로그램이 띄운 ComfyUI 는 종료할 때 자동으로 정리됩니다.
+사용자가 직접 실행한 ComfyUI 는 건드리지 않습니다.
+
 ## 워크플로 사용하기
 
 `workflows/` 폴더의 JSON 파일 하나가 워크플로 하나입니다.
@@ -87,6 +115,15 @@ ComfyUI 화면에서 `Workflow → Export (API)` 로 저장하면 바로 사용�
 
 `kind` 는 `text` / `int` / `float` / `combo` 입니다.
 여기에 없는 입력은 GUI에서 자동으로 비활성화됩니다.
+
+## 샘플러 선택
+
+Generation 영역의 **Sampler** / **Scheduler** 드롭다운은
+ComfyUI 에서 직접 받아온 선택지입니다 (`KSampler` 노드 기준).
+
+- 워크플로가 `sampler_name` 또는 `scheduler` 입력을 가지면 활성화됩니다
+- 선택하지 않으면 워크플로에 적힌 기본값이 그대로 쓰입니다
+- ComfyUI 응답이 없으면 워크플로 기본값만 표시합니다
 
 ## 폴더 구조
 

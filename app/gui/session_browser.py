@@ -12,7 +12,7 @@ from app.engine.session.manager import SessionManager, SessionMetadata
 
 
 class SessionHistoryBrowser(QWidget):
-    """Session History Browser 위젯 (v0.1 §9, §40).
+    """Session History Browser 위젯.
 
     sessions/YYYY-MM-DD/HHmmss-N/ 구조의 세션을 브라우징한다.
     - 세션 메타데이터 확인

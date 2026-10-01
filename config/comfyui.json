@@ -5,6 +5,8 @@
   "connect_timeout_seconds": 5,
   "auto_launch": false,
   "launch_command": "",
+  "launch_working_dir": "",
+  "launch_wait_seconds": 90,
   "model_folders": [
     "checkpoints",
     "diffusion_models",

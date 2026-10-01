@@ -14,6 +14,7 @@ from PIL import Image
 
 from app.engine.comfy_engine import GeurimGyeolEngine
 from app.comfy.client import SystemInfo
+from app.comfy.config import ComfyUIConfig
 
 
 def _png_bytes(size=(64, 64), color=(200, 30, 30)) -> bytes:
@@ -269,6 +270,264 @@ def test_generate_records_session_metadata(engine, fake_comfy):
     assert data["original_prompt"] == "고양이"
     assert data["image_model"] == "테스트 워크플로"
     assert data["seed"] == 5
+
+
+def test_metadata_records_actual_sampler(engine, fake_comfy):
+    """메타데이터의 sampler/scheduler 가 기본값이 아니라 실제 값이다.
+
+    회귀 방지: OutputMetadata 의 기본 sampler 는 "euler_a" 라서,
+    실제 전송값을 기록하지 않으면 어떤 samplers 를 골라도 이 값이 남는다.
+    """
+    fake_comfy["images"] = [{"filename": "a.png", "subfolder": ""}]
+    req = engine.build_request(
+        prompt="x",
+        extra={"sampler_name": "dpmpp_2m", "scheduler": "karras"},
+    )
+    result = engine.generate(req)
+    assert result.success is True, result.error
+    assert result.metadata["sampler"] == "dpmpp_2m"
+    assert result.metadata["scheduler"] == "karras"
+
+
+def test_metadata_reads_applied_payload_not_request(engine, fake_comfy):
+    """메타데이터는 요청값이 아니라 전송된 payload 기준이다."""
+    fake_comfy["images"] = [{"filename": "a.png", "subfolder": ""}]
+    req = engine.build_request(prompt="고양이", width=256, height=384, steps=7)
+    result = engine.generate(req)
+    assert result.metadata["prompt"] == "고양이"
+    assert result.metadata["width"] == 256
+    assert result.metadata["height"] == 384
+    assert result.metadata["steps"] == 7
+
+
+def test_session_metadata_matches_output(engine, fake_comfy):
+    """세션 기록과 출력 메타데이터의 값이 일치한다."""
+    import json as _json
+
+    fake_comfy["images"] = [{"filename": "a.png", "subfolder": ""}]
+    engine.generate(
+        engine.build_request(prompt="강아지", extra={"sampler_name": "heun"})
+    )
+
+    output_json = sorted(engine.outputs.outputs_root.rglob("*.json"))
+    out = _json.loads(output_json[0].read_text(encoding="utf-8"))
+    session = _json.loads(
+        (engine.sessions.list_sessions()[0] / "session.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert out["sampler"] == "heun"
+    assert session["sampler"] == "heun"
+    assert session["original_prompt"] == "강아지"
+
+
+# --- 파라미터 키와 입력 이름의 불일치 (회귀 방지) ---------------------
+
+
+def test_sampler_key_may_differ_from_comfy_input_name(engine):
+    """parameters 키가 ComfyUI 입력 이름과 달라도 주입돼야 한다.
+
+    회귀 방지: 워크플로는 "sampler" 로 정의하지만 KSampler 입력은
+    "sampler_name" 이다. 키 이름으로 조회하면 조용히 실패한다.
+    """
+    params = engine.active_workflow.parameters
+    assert "sampler_name" in params, "자동 추론이 sampler_name 을 찾아야 한다"
+
+    by_input = {spec.input: key for key, spec in params.items()}
+    assert by_input["sampler_name"] == "sampler_name"
+    assert by_input["scheduler"] == "scheduler"
+
+
+def test_explicit_sampler_key_resolves_via_input_name(workflow_dir: Path):
+    """사용자가 "sampler" 로 정의해도 입력 이름으로 찾아서 주입한다."""
+    import json as _json
+
+    path = workflow_dir / "test-wf.json"
+    data = _json.loads(path.read_text(encoding="utf-8"))
+    data["parameters"] = {
+        "sampler": {"node": "6", "input": "sampler_name", "kind": "combo"},
+        "scheduler": {"node": "6", "input": "scheduler", "kind": "combo"},
+    }
+    path.write_text(_json.dumps(data), encoding="utf-8")
+
+    eng = GeurimGyeolEngine(workflow_dir.parent)
+    eng.refresh_workflows()
+    req = eng.build_request(
+        prompt="x", extra={"sampler": "dpmpp_2m", "scheduler": "karras"}
+    )
+    _, payload = eng._payload(req)
+
+    assert payload["6"]["inputs"]["sampler_name"] == "dpmpp_2m"
+    assert payload["6"]["inputs"]["scheduler"] == "karras"
+
+
+# --- ComfyUI 자동 실행 ------------------------------------------------
+
+
+def test_launch_argv_adds_api_and_port():
+    """launch_command 에 --api 와 --port 가 자동으로 붙는다."""
+    cfg = ComfyUIConfig(launch_command="python main.py", port=8188)
+    argv = cfg.build_launch_argv()
+    assert argv[:2] == ["python", "main.py"]
+    assert "--api" in argv
+    assert argv[argv.index("--port") + 1] == "8188"
+
+
+def test_launch_argv_keeps_explicit_flags():
+    """이미 --api 와 --port 가 있으면 중복해서 붙이지 않는다."""
+    cfg = ComfyUIConfig(
+        launch_command="python main.py --api --port 9999", port=8188
+    )
+    argv = cfg.build_launch_argv()
+    assert argv.count("--api") == 1
+    assert argv.count("--port") == 1
+    assert argv[argv.index("--port") + 1] == "9999"
+
+
+def test_launch_argv_handles_path_with_spaces():
+    """공백이 포함된 경로를 깨뜨리지 않는다 (따옴표로 감싼 경우)."""
+    cfg = ComfyUIConfig(
+        launch_command='"C:\\Program Files\\ComfyUI\\python.exe" main.py'
+    )
+    argv = cfg.build_launch_argv()
+    assert argv[0] == "C:\\Program Files\\ComfyUI\\python.exe"
+    assert argv[1] == "main.py"
+
+
+def test_launch_argv_empty_when_not_configured():
+    """launch_command 가 비어 있으면 실행할 것이 없다."""
+    assert ComfyUIConfig(launch_command="").build_launch_argv() == []
+    assert ComfyUIConfig(launch_command="   ").build_launch_argv() == []
+
+
+def test_launch_returns_none_without_command():
+    """실행 명령이 없으면 None 을 돌려주고 예외를 내지 않는다."""
+    assert ComfyUIConfig(launch_command="").launch() is None
+
+
+def test_launch_returns_none_on_bad_working_dir():
+    """launch_working_dir 가 없으면 실행하지 않는다."""
+    cfg = ComfyUIConfig(
+        launch_command="python main.py",
+        launch_working_dir="C:\\없는\\폴더",
+    )
+    assert cfg.launch() is None
+
+
+def test_refresh_status_launches_when_configured(workflow_dir, monkeypatch):
+    """오프라인 + auto_launch 면 실행을 시도하고 성공 시 온라인이 된다."""
+    from app.comfy.config import ComfyUIConfig
+
+    eng = GeurimGyeolEngine(workflow_dir.parent)
+    eng.config = ComfyUIConfig(
+        auto_launch=True, launch_command="python main.py", launch_wait_seconds=5
+    )
+
+    launched = []
+
+    class FakeProc:
+        pid = 4242
+        returncode = None
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            pass
+
+    def fake_launch(self, logger=None):
+        launched.append(True)
+        return FakeProc()
+
+    monkeypatch.setattr(
+        "app.comfy.config.ComfyUIConfig.launch", fake_launch, raising=True
+    )
+
+    calls = {"n": 0}
+
+    async def fake_info(self):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("offline")
+        return SystemInfo(online=True, vram_total_gb=8.0, vram_free_gb=4.0)
+
+    monkeypatch.setattr(
+        "app.comfy.client.ComfyClient.get_system_info", fake_info
+    )
+
+    info = eng.refresh_status()
+    assert info.online is True
+    assert launched, "launch 가 호출되어야 한다"
+    eng.stop_launched()
+
+
+def test_refresh_status_does_not_launch_when_disabled(
+    workflow_dir, monkeypatch
+):
+    """auto_launch 가 꺼져 있으면 아무것도 실행하지 않는다."""
+    eng = GeurimGyeolEngine(workflow_dir.parent)
+    eng.config.auto_launch = False
+
+    async def offline(self):
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr(
+        "app.comfy.client.ComfyClient.get_system_info", offline, raising=True
+    )
+
+    def never(self, logger=None):
+        raise AssertionError("실행되면 안 됩니다")
+
+    monkeypatch.setattr(
+        "app.comfy.config.ComfyUIConfig.launch", never, raising=True
+    )
+
+    info = eng.refresh_status()
+    assert info.online is False
+
+
+def test_refresh_status_can_skip_launch(workflow_dir, monkeypatch):
+    """allow_launch=False 면 조회만 하고 실행하지 않는다."""
+    eng = GeurimGyeolEngine(workflow_dir.parent)
+    eng.config.auto_launch = True
+
+    def never(self, logger=None):
+        raise AssertionError("실행되면 안 됩니다")
+
+    monkeypatch.setattr(
+        "app.comfy.config.ComfyUIConfig.launch", never, raising=True
+    )
+
+    async def offline(self):
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr(
+        "app.comfy.client.ComfyClient.get_system_info", offline, raising=True
+    )
+
+    assert eng.refresh_status(allow_launch=False).online is False
+
+
+def test_stop_launched_only_stops_own_process(workflow_dir):
+    """사용자가 직접 실행한 ComfyUI 는 건드리지 않는다."""
+    eng = GeurimGyeolEngine(workflow_dir.parent)
+    eng.stop_launched()  # 실행한 적 없으면 아무 일도 일어나지 않아야 한다
+
+    class FakeProc:
+        pid = 1
+        terminated = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+    proc = FakeProc()
+    eng._launched_process = proc
+    eng.stop_launched()
+    assert proc.terminated is True
+    assert eng._launched_process is None
 
 
 # --- 이벤트 루프 재사용 (회귀 방지) ----------------------------------

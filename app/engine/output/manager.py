@@ -8,7 +8,11 @@ from pathlib import Path
 
 @dataclass
 class OutputMetadata:
-    """출력 이미지 메타데이터 (v0.1 §23, §22 Reproducibility)."""
+    """출력 이미지 메타데이터.
+
+    같은 프롬프트로 같은 결과를 다시 만들 수 있도록 (Reproducibility)
+    생성에 사용한 모든 값을 기록한다.
+    """
 
     seed: int
     model: str
@@ -70,7 +74,7 @@ class OutputMetadata:
 
 
 class OutputManager:
-    """출력 이미지/JSON 저장 및 관리 (v0.1 §23, PHASE 9).
+    """출력 이미지/JSON 저장 및 관리.
 
     구조:
         outputs/
