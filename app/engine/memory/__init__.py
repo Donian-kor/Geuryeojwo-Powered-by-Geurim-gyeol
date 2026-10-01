@@ -1,1 +1,3 @@
-from .manager import MemoryManager
+from .manager import MemoryManager, MemorySnapshot
+
+__all__ = ["MemoryManager", "MemorySnapshot"]

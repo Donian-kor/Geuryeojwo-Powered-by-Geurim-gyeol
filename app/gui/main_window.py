@@ -5,7 +5,7 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPushButton, QProgressBar, QFileDialog, QMessageBox, QFormLayout, QGroupBox
 from app.engine import GeurimGyeolEngine
-from app.engine.generation.controller import GenerationRequest
+from app.engine.generation.controller import GenerationRequest, GenerationResult
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -14,13 +14,14 @@ class Worker(QThread):
     def __init__(self, controller, req): super().__init__(); self.controller=controller; self.req=req
     def run(self):
         try:
-            path, meta = self.controller.run(self.req, lambda v,m: self.progress.emit(v,m)); self.done.emit(str(path), meta)
+            result: GenerationResult = self.controller.run(self.req, lambda v,m: self.progress.emit(v,m))
+            self.done.emit(str(result.image_path), result.metadata)
         except Exception as e: self.failed.emit(str(e))
 
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__(); self.setWindowTitle("그려줘 v0.1 — Geuryeojwo"); self.resize(1180, 820)
-        self.engine=GeurimGyeolEngine(ROOT); self.worker=None
+        self.engine=GeurimGyeolEngine(ROOT); self.engine.initialize(); self.worker=None
         self.build_ui(); self.refresh_models()
 
     def build_ui(self):
@@ -65,6 +66,10 @@ class MainWindow(QWidget):
     def done(self,path,meta):
         self.generate.setEnabled(True); self.preview.setPixmap(QPixmap(path).scaled(self.preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)); self.status.setText(f"완료: {path}"); self.log.append(f"저장: {path}\nPrompt: {meta['prompt']}")
     def fail(self,msg): self.generate.setEnabled(True); self.status.setText("실패"); self.log.append("ERROR: "+msg); QMessageBox.critical(self,"생성 실패",msg)
+
+    def closeEvent(self, event):
+        self.engine.shutdown()
+        super().closeEvent(event)
 
 def run():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")

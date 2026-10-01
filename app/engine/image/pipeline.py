@@ -2,65 +2,125 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
-class NativeImageEngine:
-    """Native Diffusers adapter. The process owns the pipeline; no external server."""
+from .base import ImageModelAdapter, GenerationResult
+from .adapters import SD15Adapter, SDXLAdapter
+
+
+class ImagePipelineManager:
+    """Native Diffusers pipeline manager with Adapter selection (v0.1 §17).
+
+    The process owns the pipeline; no external server.
+    Selects the correct ImageModelAdapter based on architecture.
+    """
+
+    _ADAPTERS: dict[str, type[ImageModelAdapter]] = {
+        "sd15": SD15Adapter,
+        "sd21": SD15Adapter,
+        "sdxl": SDXLAdapter,
+    }
+
     def __init__(self, hardware, memory, logger):
         self.hardware = hardware
         self.memory = memory
         self.logger = logger
-        self.pipe = None
-        self.loaded_path = None
+        self._adapter: ImageModelAdapter | None = None
+        self._current_arch: str | None = None
 
-    def _dtype(self):
+    def supported_architectures(self) -> list[str]:
+        return list(self._ADAPTERS.keys())
+
+    def can_handle(self, architecture: str) -> bool:
+        return architecture in self._ADAPTERS
+
+    def estimate_memory(self, architecture: str) -> float:
+        """예상 VRAM (GB) for the given architecture."""
+        adapter_cls = self._ADAPTERS.get(architecture)
+        if adapter_cls is None:
+            return 0.0
+        return adapter_cls(self.hardware, self.logger).estimate_memory()
+
+    def check_vram(self, architecture: str) -> tuple[bool, str]:
+        """OOM Protection (v0.1 §8.4): estimate VRAM vs available."""
         try:
             import torch
-            return torch.float16 if self.hardware.dtype == "float16" else torch.float32
+            if not torch.cuda.is_available():
+                return True, "CPU mode — no VRAM limit"
+            free, total = torch.cuda.mem_get_info()
+            free_gb = free / 1024**3
+            total_gb = total / 1024**3
+            est = self.estimate_memory(architecture)
+            margin = 0.5  # GB safety margin
+            if est + margin > free_gb:
+                if est > total_gb:
+                    return False, (
+                        f"예상 VRAM 사용량 ({est:.1f} GB)이 전체 VRAM "
+                        f"({total_gb:.1f} GB)을 초과합니다."
+                    )
+                return False, (
+                    f"예상 VRAM 사용량 ({est:.1f} GB) + 여유 ({margin:.1f} GB) "
+                    f"이 사용 가능 VRAM ({free_gb:.1f} GB)을 초과합니다. "
+                    f"해상도를 낮추거나 Steps를 줄이세요."
+                )
+            return True, (
+                f"VRAM OK: {est:.1f} GB / {free_gb:.1f} GB 사용 가능"
+            )
         except Exception:
-            return None
+            return True, "VRAM 확인 불가 — 계속 진행"
 
-    def load(self, model_path: Path, architecture: str):
-        try:
-            import torch
-            from diffusers import AutoPipelineForText2Image, StableDiffusionPipeline
-        except ImportError as e:
-            raise RuntimeError("torch/diffusers are not installed. Install requirements.txt first.") from e
-        dtype = self._dtype()
-        device = self.hardware.device
-        self.memory.cleanup()
-        if model_path.is_dir():
-            self.pipe = AutoPipelineForText2Image.from_pretrained(str(model_path), torch_dtype=dtype, local_files_only=True)
-        elif architecture in {"sd15", "sd21", "sdxl"}:
-            self.pipe = StableDiffusionPipeline.from_single_file(str(model_path), torch_dtype=dtype, local_files_only=True)
-        else:
-            raise RuntimeError(f"No v0.1 native single-file loader is registered for architecture: {architecture}. Use a Diffusers directory or add an adapter.")
-        self.pipe = self.pipe.to(device)
-        if hasattr(self.pipe, "enable_attention_slicing"):
-            self.pipe.enable_attention_slicing()
-        self.loaded_path = model_path
+    def load(self, model_path: Path, architecture: str) -> None:
+        """Adapter 선택 후 모델 로드 + OOM 사전 검증."""
+        if not self.can_handle(architecture):
+            raise RuntimeError(
+                f"지원하지 않는 아키텍처: {architecture}. "
+                f"지원: {self.supported_architectures()}"
+            )
 
-    def generate(self, prompt: str, negative: str, width: int, height: int, steps: int, cfg: float, seed: int, progress: Callable[[int], None] | None = None):
-        if self.pipe is None:
+        ok, msg = self.check_vram(architecture)
+        self.logger.info("VRAM check: %s", msg)
+        if not ok:
+            raise RuntimeError(f"OOM 위험: {msg}")
+
+        adapter_cls = self._ADAPTERS[architecture]
+        self._adapter = adapter_cls(self.hardware, self.logger)
+        self._current_arch = architecture
+        self._adapter.load(model_path)
+
+    @property
+    def adapter(self) -> ImageModelAdapter | None:
+        return self._adapter
+
+    @property
+    def loaded_path(self) -> Path | None:
+        return self._adapter.loaded_path if self._adapter else None
+
+    def generate(
+        self,
+        prompt: str,
+        negative: str,
+        width: int,
+        height: int,
+        steps: int,
+        cfg: float,
+        seed: int,
+        progress: Callable[[int], None] | None = None,
+    ) -> tuple:
+        """Delegate generation to the active adapter."""
+        if self._adapter is None:
             raise RuntimeError("Image model is not loaded")
-        import torch
-        generator = torch.Generator(device=self.hardware.device if self.hardware.device != "mps" else "cpu")
-        if seed < 0:
-            seed = int(torch.randint(0, 2**31 - 1, (1,), generator=generator).item())
-        else:
-            generator.manual_seed(seed)
-        kwargs = dict(prompt=prompt, negative_prompt=negative or None, width=width, height=height, num_inference_steps=steps, guidance_scale=cfg, generator=generator)
-        if progress:
-            def cb(pipe, step, timestep, callback_kwargs):
-                progress(int((step + 1) / max(steps, 1) * 100))
-                return callback_kwargs
-            try:
-                result = self.pipe(callback_on_step_end=cb, **kwargs)
-            except TypeError:
-                result = self.pipe(**kwargs)
-        else:
-            result = self.pipe(**kwargs)
-        return result.images[0], seed
+        result: GenerationResult = self._adapter.generate(
+            prompt, negative, width, height, steps, cfg, seed, progress
+        )
+        return result.image, result.seed
 
-    def unload(self):
-        self.pipe = None
-        self.loaded_path = None
+    def unload(self) -> None:
+        """Unloading the pipeline and cleaning memory."""
+        if self._adapter:
+            self._adapter.unload()
+        self._adapter = None
+        self._current_arch = None
         self.memory.cleanup()
+
+    def supports_negative_prompt(self) -> bool:
+        if self._adapter:
+            return self._adapter.supports_negative_prompt
+        return True
