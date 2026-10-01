@@ -1,18 +1,15 @@
 PySide6>=6.6,<7
 Pillow>=10,<13
-# GPU 기본 동작 (v0.1 §7). CUDA 빌드를 쓰려면 기본 인덱스가 아니라
-# PyTorch 공식 CUDA 인덱스로 설치해야 한다:
-#   pip install torch --index-url https://download.pytorch.org/whl/cu130
-# CUDA 빌드를 쓰지 않으면 CPU 폴백으로 동작한다 (float32).
-torch>=2.2
-transformers>=4.40
-accelerate>=0.28
-diffusers>=0.30
-safetensors>=0.4
-sentencepiece>=0.2
-# VRAM/RAM 모니터링용 시스템 정보 라이브러리 (v0.1 §8.3, §30)
+# ComfyUI API 연동 (v0.2 §9)
+httpx>=0.27
+websockets>=12.0
+# 시스템 자원 표시용
 psutil>=5.9
-# GGUF local LLM runtime. On some platforms this may build from source.
-llama-cpp-python>=0.3
-# 테스트 runner (v0.1 §36)
+# 테스트 runner
 pytest>=8.0
+
+# ─────────────────────────────────────────────────────────────
+# torch, diffusers, transformers, llama-cpp-python 은 필요 없다.
+# 모델 실행은 ComfyUI가 담당하며(v0.2 §3), 이 프로그램은 GPU를
+# 직접 사용하지 않는다. CUDA 빌드 설치도 ComfyUI 쪽 몫이다.
+# ─────────────────────────────────────────────────────────────

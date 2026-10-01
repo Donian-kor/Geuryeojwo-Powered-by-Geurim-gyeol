@@ -1,0 +1,15 @@
+{
+  "host": "127.0.0.1",
+  "port": 8188,
+  "timeout_seconds": 300,
+  "connect_timeout_seconds": 5,
+  "auto_launch": false,
+  "launch_command": "",
+  "model_folders": [
+    "checkpoints",
+    "diffusion_models",
+    "vae",
+    "loras",
+    "text_encoders"
+  ]
+}
