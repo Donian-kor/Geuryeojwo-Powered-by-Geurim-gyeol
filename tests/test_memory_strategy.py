@@ -180,12 +180,22 @@ def test_pipeline_plan_strategy(engine):
     assert isinstance(strategy.describe(), str)
 
 
-def test_pipeline_plan_strategy_uses_ram(engine):
+def test_pipeline_plan_strategy_uses_ram(engine, monkeypatch):
     """VRAM을 넘는 모델은 offload 전략으로 넘어간다 (§8.2).
 
-    감지 VRAM(7.9GB)보다 큰 추정치를 가진 아키텍처는 자동 offload된다.
+    감지 VRAM보다 큰 추정치를 가진 아키텍처는 자동 offload된다.
+
+    주의: decide_strategy 는 ram_available_gb 가 None 이면 psutil 로
+    실제 시스템 RAM 을 조회한다. 그 값은 실행 순간의 가용 메모리에 따라
+    달라지므로 (다른 프로그램 사용량, 캐시 상태 등) 결과가 흔들린다.
+    그래서 필요한 RAM 을 확실히 확보된 값으로 고정해
+    'offload 로 충분하다'는 분기를 검증한다.
     """
     from app.engine.memory.strategy import MemoryTier, OffloadMode
+
+    monkeypatch.setattr(
+        "app.engine.memory.strategy.current_ram_available_gb", lambda: 32.0
+    )
 
     strategy = engine.image.plan_strategy("sd3")  # 추정 9.5GB > 감지 7.9GB
     assert strategy.tier == MemoryTier.OFFLOAD

@@ -32,13 +32,46 @@ def test_enhance_prompt_without_llm(engine):
 
 
 def test_no_external_dependency_imports(project_root):
-    """§3.1 External Runtime Dependency = 0."""
+    """v0.2 §3: 외부 런타임 의존 = ComfyUI.
+
+    - 허용: httpx / websockets (ComfyUI API 클라이언트)
+    - 금지: 외부 AI 서버를 직접 호출하는 클라이언트
+      (requests, websocket-client, aiohttp, lmstudio 등).
+      ComfyUI를 거치지 않고 다른 서버로 직접 나가지 않아야 한다.
+    """
+    allowed = {"httpx", "websockets", "urllib"}
     forbidden = {
-        "requests", "websocket", "aiohttp", "httpx", "urllib.request",
-        "http.client", "lmstudio", "lm_studio", "comfy", "comfyui",
+        "requests", "websocket", "aiohttp", "lmstudio", "lm_studio",
+        "openai", "anthropic", "replicate", "fal_client",
     }
     offenders = []
     for py_file in (project_root / "app").rglob("*.py"):
+        tree = ast.parse(py_file.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            names: list[str] = []
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module]
+            for name in names:
+                top = name.split(".")[0]
+                if top in allowed:
+                    continue
+                if top in forbidden:
+                    offenders.append(f"{py_file.name}: {name}")
+    assert not offenders, f"ComfyUI 외 외부 의존성 발견: {offenders}"
+
+
+def test_comfy_client_is_the_only_inference_path(project_root):
+    """모델 실행 경로는 ComfyUI 클라이언트 하나뿐이다 (v0.2 §3).
+
+    네이티브 추론 라이브러리(torch, diffusers, transformers)를 직접
+    import 하면 ComfyUI를 우회해 GPU를 직접 점유하게 되므로 금지한다.
+    """
+    forbidden = {"torch", "diffusers", "transformers", "safetensors"}
+    comfy_dir = (project_root / "app" / "comfy")
+    offenders = []
+    for py_file in comfy_dir.glob("*.py"):
         tree = ast.parse(py_file.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -48,7 +81,7 @@ def test_no_external_dependency_imports(project_root):
             elif isinstance(node, ast.ImportFrom) and node.module:
                 if node.module.split(".")[0] in forbidden:
                     offenders.append(f"{py_file.name}: from {node.module}")
-    assert not offenders, f"외부 의존성 발견: {offenders}"
+    assert not offenders, f"ComfyUI 모듈에 네이티브 의존성 발견: {offenders}"
 
 
 def test_requirements_have_no_external_servers(project_root):

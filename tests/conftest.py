@@ -43,11 +43,20 @@ def restore_vram_budget(engine):
 
     엔진은 세션 스코드로 공유되므로, 예산을 바꾸는 테스트가
     다른 테스트에 영향을 주지 않도록 한다.
+
+    주의: VramBudgetManager.set_mode 는 custom_gb 가 None 이 아닐 때만
+    custom_gb 를 덮어쓴다. 원래 상태가 None 인데 복원 시 값을 넘기면
+    "미지정" 이 "custom 8GB" 로 굳어 이후 테스트를 오염시킨다.
+    그래서 원래 값이 None 이면 인자 없이 모드만 되돌린다.
     """
     original_mode = engine.vram_budget.mode
     original_gb = engine.vram_budget.custom_gb
     yield engine
-    engine.vram_budget.set_mode(original_mode, original_gb)
+    if original_gb is None:
+        engine.vram_budget.custom_gb = None
+        engine.vram_budget.set_mode(original_mode)
+    else:
+        engine.vram_budget.set_mode(original_mode, original_gb)
 
 
 @pytest.fixture
