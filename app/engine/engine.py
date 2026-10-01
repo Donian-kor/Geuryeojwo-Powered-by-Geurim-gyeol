@@ -8,6 +8,8 @@ from .prompt.engine import PromptEngine
 from .image.pipeline import ImagePipelineManager
 from .generation.controller import GenerationController
 from .generation.task_runner import TaskRunner
+from .logging.manager import LogManager
+from .error.handler import ErrorHandler, ErrorType, RecoverySuggestion
 
 
 class GeurimGyeolEngine:
@@ -22,9 +24,10 @@ class GeurimGyeolEngine:
 
     def __init__(self, root: Path):
         self.root = root
-        self.logger = logging.getLogger("geurim-gyeol")
+        self.logs = LogManager(root / "logs")
+        self.logger = self.logs.get_logger("engine")
         self.hardware = detect_hardware()
-        self.memory = MemoryManager(self.logger)
+        self.memory = MemoryManager(self.logs.memory)
         self.registry = ModelRegistry(
             root / "models", root / "config" / "image_profiles.json"
         )
@@ -39,16 +42,26 @@ class GeurimGyeolEngine:
             root / "outputs"
         )
         self.task_runner = TaskRunner(self.logger)
+        self.error_handler = ErrorHandler(self.logs.error)
         self._initialized = False
 
     def initialize(self) -> None:
         """ENGINE INITIALIZED (v0.1 §44.9)."""
         self.logger.info("GeurimGyeolEngine initialized — hardware: %s", self.hardware.backend)
+        self.logs.log_model_detection({
+            "LLM": [str(p) for p in self.registry.scan_llm()],
+            "Image": [str(p) for p in self.registry.scan_image()],
+        })
         self._initialized = True
 
     def scan_models(self):
         """Detect local LLM and image models."""
-        return self.registry.scan_llm(), self.registry.scan_image()
+        llm_models, image_models = self.registry.scan_llm(), self.registry.scan_image()
+        self.logs.log_model_detection({
+            "LLM": [str(p) for p in llm_models],
+            "Image": [str(p) for p in image_models],
+        })
+        return llm_models, image_models
 
     def shutdown(self) -> None:
         """ENGINE SHUTDOWN — unload any loaded models."""
