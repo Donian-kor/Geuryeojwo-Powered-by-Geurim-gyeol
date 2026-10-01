@@ -2,15 +2,14 @@ from __future__ import annotations
 import sys, logging, atexit
 from pathlib import Path
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QPixmap, QBrush, QColor
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit,
     QComboBox, QSpinBox, QDoubleSpinBox, QPushButton, QProgressBar,
     QMessageBox, QGroupBox, QTabWidget, QSizePolicy, QGridLayout, QSlider, QCheckBox,
 )
 from app.engine.comfy_engine import GeurimGyeolEngine, _is_enhancer
-from app.gui.output_browser import OutputBrowser
-from app.gui.session_browser import SessionHistoryBrowser
+from app.gui.session_browser import HistoryBrowser
 from app.gui.theme.manager import ThemeManager
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -49,7 +48,7 @@ class ModelInfoPanel(QGroupBox):
     """
 
     def __init__(self, engine, parent=None):
-        super().__init__("Workflow", parent)
+        super().__init__("ModelInfo", parent)
         self.engine = engine
         self._build_ui()
         self.refresh()
@@ -121,7 +120,9 @@ class MainWindow(QWidget):
         super().__init__()
         self.setWindowTitle("그려줘 v0.2 — Geuryeojwo")
         self._fit_to_screen()
-        self.setMinimumSize(900, 520)
+        # 최소 높이는 실측값이다. 700 미만이면 Generate 탭의 Prompt 프레임과
+        # spinbox 가 잘린다 (탭 영역 = 창 높이 - 약 96px, 필요 높이 약 604px).
+        self.setMinimumSize(900, 700)
         self.engine=GeurimGyeolEngine(ROOT); self.engine.initialize(); self.worker=None
         self.theme_manager=ThemeManager(QApplication.instance(), ROOT / "config" / "theme_config.json"); self.theme_manager.apply_theme()
         self.build_ui(); self.refresh_models()
@@ -135,7 +136,9 @@ class MainWindow(QWidget):
         available = screen.availableGeometry()
         width = min(1280, int(available.width() * 0.92))
         height = min(860, int(available.height() * 0.90))
-        self.resize(max(900, width), max(520, height))
+        # setMinimumSize 와 같은 하한을 쓴다. 여기서만 700 보다 작게 잡으면
+        # 창이 열리자마자 잘린다.
+        self.resize(max(900, width), max(700, height))
 
     def build_ui(self):
         root=QVBoxLayout(self); root.setContentsMargins(8,6,8,6); root.setSpacing(6)
@@ -175,9 +178,13 @@ class MainWindow(QWidget):
             root.addWidget(warn)
 
         tabs=QTabWidget(); root.addWidget(tabs, 1)
-        tabs.addTab(self._build_generate_tab(), "Generate")
-        tabs.addTab(self._build_output_tab(), "Output Browser")
-        tabs.addTab(self._build_session_tab(), "Session History")
+        # Model 탭을 먼저 만든다. _on_workflow_changed() 가 self.model_info 를
+        # 참조하므로, Generate 탭의 시그널이 불리기 전에 준비되어야 한다.
+        model_tab=self._build_model_tab()
+        generate_tab=self._build_generate_tab()
+        tabs.addTab(generate_tab, "Generate")
+        tabs.addTab(model_tab, "Model")
+        tabs.addTab(self._build_history_tab(), "History")
 
         status_bar=QHBoxLayout()
         self.status_ram=QLabel("RAM: -"); status_bar.addWidget(self.status_ram)
@@ -191,56 +198,66 @@ class MainWindow(QWidget):
         # 첫 표시를 즉시 채운다 (타이머는 1초 후부터 동작하므로)
         self._update_status_bar()
 
-    def _build_generate_tab(self) -> QWidget:
-        """Generate 탭 (v0.2).
+    def _build_model_tab(self) -> QWidget:
+        """Model 탭 — 워크플로 선택, 모델 파일, 워크플로 요약.
 
-        모델 파일 대신 워크플로를 고르고, 그 워크플로가 받는
-        파라미터만 입력받는다.
+        모델 파일 목록은 선택한 워크플로에 종속되므로 워크플로 선택과
+        같은 화면에 둔다. Generate 탭의 세로 공간을 확보하는 효과도 있다.
         """
         tab=QWidget(); layout=QVBoxLayout(tab)
-        body=QHBoxLayout(); layout.addLayout(body)
-        left=QVBoxLayout(); body.addLayout(left,1); right=QVBoxLayout(); body.addLayout(right,1)
 
-        models=QGroupBox("Workflow"); form=QHBoxLayout(models); form.setSpacing(4)
+        wfbox=QGroupBox("Workflow"); form=QHBoxLayout(wfbox); form.setSpacing(4)
         self.workflow=QComboBox()
         form.addWidget(QLabel("워크플로")); form.addWidget(self.workflow, 1)
         self.reload_wf=QPushButton("불러오기"); self.reload_wf.clicked.connect(self._reload_workflows)
         form.addWidget(self.reload_wf)
-        left.addWidget(models)
+        layout.addWidget(wfbox)
 
         # 모델 선택 — ComfyUI 의 폴더별 목록에서 고른다 (v0.2 §5.3)
-        self.model_boxes=QGroupBox("Models"); ml=QGridLayout(models_box:=self.model_boxes)
+        self.model_boxes=QGroupBox("Models"); ml=QGridLayout(self.model_boxes)
         ml.setHorizontalSpacing(4); ml.setVerticalSpacing(2)
         # (파라미터 키, 라벨) — 워크플로가 LoRA/확산모델을 쓸 때만 활성화된다
         self.model_combos: dict[str, QComboBox] = {}
+        self._model_labels: dict[str, str] = {}
+        # 마지막으로 조회한 ComfyUI 모델 목록. "설치 안 됨" 판정에 쓴다.
+        self._model_options: dict[str, list[str]] = {}
+        # 워크플로가 지정한 모델이 ComfyUI 에 없을 때 경고한다.
+        # 없으면 다른 모델로 조용히 대체되어 사용자도 모르는 채
+        # 잘못된 모델로 생성된다. (시그널이 먼저 발화할 수 있어
+        # 콤보 만들기 전에 만든다)
+        self._model_warning=QLabel("")
+        self._model_warning.setWordWrap(True)
+        self._model_warning.setStyleSheet("color:#ff6b6b; font-size:12px;")
+        self._model_warning.setVisible(False)
         for row, (key, caption) in enumerate(
             (("unet", "확산 모델"), ("clip", "텍스트 인코더"),
              ("vae", "VAE"), ("lora", "LoRA"))
         ):
             combo=QComboBox(); combo.setMinimumWidth(120)
             self.model_combos[key]=combo
+            self._model_labels[key]=caption
+            combo.currentIndexChanged.connect(
+                lambda _i, k=key: self._update_model_warning(k)
+            )
             ml.addWidget(QLabel(caption), row, 0)
             ml.addWidget(combo, row, 1)
-        left.addWidget(self.model_boxes)
+        layout.addWidget(self.model_boxes)
+        layout.addWidget(self._model_warning)
 
-        # LoRA 강도 슬라이더 — 자주 바꾸므로 슬라이더가 편하다
-        self.lora_strength=QSlider(Qt.Horizontal); self.lora_strength.setRange(0,150)
-        self.lora_strength.setValue(100); self.lora_strength.setSingleStep(5)
-        self.lora_strength_label=QLabel("LoRA 강도 1.00")
-        self.lora_strength_label.setStyleSheet("color:#a0a0a0; font-size:11px;")
-        self.lora_strength.valueChanged.connect(
-            lambda v: self.lora_strength_label.setText(f"LoRA 강도 {v / 100:.2f}")
-        )
-        lora_row=QHBoxLayout(); lora_row.setSpacing(4)
-        lora_row.addWidget(self.lora_strength_label)
-        lora_row.addWidget(self.lora_strength, 1)
-        lora_box=QGroupBox("LoRA"); lora_lay=QVBoxLayout(lora_box); lora_lay.setSpacing(1)
-        lora_lay.addLayout(lora_row)
-        left.addWidget(lora_box)
-        self.lora_box=lora_box
-
-        self.model_info=ModelInfoPanel(self.engine); left.addWidget(self.model_info)
+        self.model_info=ModelInfoPanel(self.engine); layout.addWidget(self.model_info)
+        layout.addStretch()
         self.workflow.currentIndexChanged.connect(lambda _: self._on_workflow_changed())
+        return tab
+
+    def _build_generate_tab(self) -> QWidget:
+        """Generate 탭 (v0.2).
+
+        선택한 워크플로가 받는 파라미터만 입력받는다.
+        워크플로·모델 선택은 Model 탭에 있다.
+        """
+        tab=QWidget(); layout=QVBoxLayout(tab)
+        body=QHBoxLayout(); layout.addLayout(body)
+        left=QVBoxLayout(); body.addLayout(left,1); right=QVBoxLayout(); body.addLayout(right,1)
 
         promptbox=QGroupBox("Prompt"); pl=QVBoxLayout(promptbox)
         self.prompt=QTextEdit(); self.prompt.setPlaceholderText("무엇을 그리고 싶나요?")
@@ -277,6 +294,24 @@ class MainWindow(QWidget):
         sampler_row.addWidget(QLabel("Sampler")); sampler_row.addWidget(self.sampler,1)
         sampler_row.addWidget(QLabel("Scheduler")); sampler_row.addWidget(self.scheduler,1)
         pv.addLayout(sampler_row)
+
+        # LoRA 강도 — 별도 프레임이 아니라 Generation 프레임 안에 둔다.
+        # 워크플로에 strength_model 입력이 없으면 이 줄만 숨긴다
+        # (_setup_lora_strength 가 self.lora_box 를 토글한다).
+        self.lora_strength=QSlider(Qt.Horizontal); self.lora_strength.setRange(0,150)
+        self.lora_strength.setValue(100); self.lora_strength.setSingleStep(5)
+        self.lora_strength_label=QLabel("LoRA 강도 1.00")
+        self.lora_strength_label.setStyleSheet("color:#a0a0a0; font-size:11px;")
+        self.lora_strength.valueChanged.connect(
+            lambda v: self.lora_strength_label.setText(f"LoRA 강도 {v / 100:.2f}")
+        )
+        self.lora_box=QWidget()
+        lora_row=QHBoxLayout(self.lora_box); lora_row.setSpacing(4)
+        lora_row.setContentsMargins(0,0,0,0)
+        lora_row.addWidget(self.lora_strength_label)
+        lora_row.addWidget(self.lora_strength, 1)
+        pv.addWidget(self.lora_box)
+
         left.addWidget(params)
 
         self.neg=QTextEdit(); self.neg.setPlaceholderText("Negative prompt (선택)")
@@ -304,17 +339,11 @@ class MainWindow(QWidget):
         self.refresh.clicked.connect(self.refresh_models)
         return tab
 
-    def _build_output_tab(self) -> QWidget:
-        """Output Browser 탭."""
-        self.output_browser=OutputBrowser(ROOT / "outputs")
-        self.output_browser.regenerate_requested.connect(self._on_regenerate_from_output)
-        return self.output_browser
-
-    def _build_session_tab(self) -> QWidget:
-        """Session History 탭."""
-        self.session_browser=SessionHistoryBrowser(ROOT / "sessions")
-        self.session_browser.regenerate_requested.connect(self._on_regenerate_from_session)
-        return self.session_browser
+    def _build_history_tab(self) -> QWidget:
+        """History 탭 (Output Browser + Session History 통합)."""
+        self.history_browser = HistoryBrowser(ROOT / "sessions", ROOT / "outputs")
+        self.history_browser.regenerate_requested.connect(self._on_regenerate)
+        return self.history_browser
 
     def _toggle_theme(self) -> None:
         """다크/라이트 테마 토글 (§24)."""
@@ -370,21 +399,24 @@ class MainWindow(QWidget):
         if isinstance(value, (int, float)):
             self.lora_strength.setValue(int(round(float(value) * 100)))
 
-    def _on_regenerate_from_output(self, prompt: str, params: dict) -> None:
-        """Output Browser에서 재생성 요청."""
-        self._apply_regenerated(prompt, params)
-        self.status.setText("파라미터를 불러왔습니다. 그려줘를 눌러주세요.")
+    def _on_regenerate(self, prompt: str, params: dict, image_model: object) -> None:
+        """History 탭에서 재생성 요청.
 
-    def _on_regenerate_from_session(self, prompt: str, params: dict, image_model: str) -> None:
-        """Session History에서 재생성 요청."""
+        워크플로 이름이 있으면 그 워크플로까지 선택한다.
+        미분류 출력처럼 이름이 없으면 파라미터만 되돌린다.
+        """
         self._apply_regenerated(prompt, params)
 
-        # 세션에는 워크플로 이름이 저장되어 있다 (v0.2 에서는 모델 경로가 아니다)
+        if not image_model:
+            self.status.setText("파라미터를 불러왔습니다. 그려줘를 눌러주세요.")
+            return
+
+        # 기록에는 워크플로 표시 이름이 저장되어 있다 (v0.2 에서는 모델 경로가 아니다)
         name = str(image_model)
         index = self._find_workflow_index(name)
         if index >= 0:
             self.workflow.setCurrentIndex(index)
-            self.status.setText("세션의 워크플로와 파라미터를 불러왔습니다. 그려줘를 눌러주세요.")
+            self.status.setText("기록의 워크플로와 파라미터를 불러왔습니다. 그려줘를 눌러주세요.")
         else:
             self.status.setText(
                 f"파라미터를 불러왔습니다. (워크플로 '{name}' 을 찾을 수 없어 "
@@ -498,8 +530,15 @@ class MainWindow(QWidget):
 
         워크플로에 없는 모델 종류는 비활성화한다.
         ComfyUI 오프라인이면 워크플로 기본값만 보여준다.
+
+        워크플로가 지정한 모델이 ComfyUI 목록에 없으면 목록의
+        다른 파일로 대체하지 않는다. 목록에 없는 이름을 그대로
+        넣고 빨간색으로 표시한다. 대체해 버리면 사용자도 모르는 채
+        잘못된 모델로 생성된다.
         """
         options = self.engine.model_options()
+        # ComfyUI 목록을 저장해 두어야 "설치 안 됨"을 다시 판정할 수 있다
+        self._model_options = options
         for key, combo in self.model_combos.items():
             combo.blockSignals(True)
             combo.clear()
@@ -520,11 +559,84 @@ class MainWindow(QWidget):
                 items = [current] if current else []
             for item in items:
                 combo.addItem(item)
+            # 목록에 없다고 버리지 말고 그대로 넣는다 (교체하지 않는다)
+            if current and str(current) not in items:
+                combo.insertItem(0, str(current))
             if current:
                 index = combo.findText(str(current))
                 if index >= 0:
                     combo.setCurrentIndex(index)
             combo.blockSignals(False)
+        self._paint_missing_models()
+
+    def _installed_models(self, key: str) -> list[str]:
+        """이 모델 키가 쓰는 ComfyUI 폴더의 설치된 파일 목록."""
+        params = (self.engine.active_workflow.parameters
+                  if self.engine.active_workflow else {})
+        spec = params.get(key)
+        if spec is None or ":" not in spec.kind:
+            return []
+        return list(self._model_options.get(spec.kind.split(":", 1)[1]) or [])
+
+    def _paint_missing_models(self) -> None:
+        """설치되지 않은 모델 항목을 빨간색과 툴팁으로 표시한다."""
+        for key, combo in self.model_combos.items():
+            if not combo.isEnabled():
+                continue
+            installed = self._installed_models(key)
+            if not installed:
+                # ComfyUI 목록을 못 받은 상태라 판정할 수 없다
+                continue
+            for i in range(combo.count()):
+                text = combo.itemText(i)
+                if text in installed:
+                    combo.setItemData(i, QBrush(QColor("#c9d1d9")), Qt.ForegroundRole)
+                    combo.setItemData(i, "", Qt.ToolTipRole)
+                else:
+                    combo.setItemData(i, QBrush(QColor("#ff6b6b")), Qt.ForegroundRole)
+                    combo.setItemData(
+                        i, f"{text} — ComfyUI 에 설치되어 있지 않습니다",
+                        Qt.ToolTipRole,
+                    )
+        self._update_model_warning()
+
+    def _missing_models(self) -> list[tuple[str, str]]:
+        """현재 선택된 값 중 설치되지 않은 모델 목록.
+
+        Returns:
+            [(콤보 키, 모델 파일명), ...]
+        """
+        missing: list[tuple[str, str]] = []
+        for key, combo in self.model_combos.items():
+            if not combo.isEnabled():
+                continue
+            text = combo.currentText()
+            if not text or text.startswith("("):
+                continue
+            installed = self._installed_models(key)
+            if installed and text not in installed:
+                missing.append((key, text))
+        return missing
+
+    def _update_model_warning(self, _key=None) -> None:
+        """모델 탭의 경고 라벨을 갱신한다.
+
+        콤보 값이 바뀌면 호출되므로, 사용자가 설치된 모델을 고르면
+        경고가 사라진다.
+        """
+        missing = self._missing_models()
+        if not missing:
+            self._model_warning.setText("")
+            self._model_warning.setVisible(False)
+            return
+        names = ", ".join(
+            f"{self._model_labels.get(key, key)}: {name}" for key, name in missing
+        )
+        self._model_warning.setText(
+            f"⚠ 설치되지 않은 모델 — {names}\n"
+            "Model 탭에서 ComfyUI 에 설치된 모델로 바꿔야 생성할 수 있습니다."
+        )
+        self._model_warning.setVisible(True)
 
     def _setup_lora_strength(self, params: dict, defaults: dict) -> None:
         """LoRA 강도 슬라이더를 워크플로에 맞춘다.
@@ -605,6 +717,23 @@ class MainWindow(QWidget):
                                 "ComfyUI 서버에 접속할 수 없습니다.\n"
                                 "ComfyUI를 실행한 뒤 상태를 새로고침해주세요."); return
 
+        # 워크플로가 지정한 모델이 설치되지 않았으면 미리 막는다.
+        # 없던 모델을 목록의 다른 파일로 대체하지 않으므로 그대로 보내면
+        # ComfyUI 가 node_errors 로 거부한다 (§5.3).
+        missing = self._missing_models()
+        if missing:
+            names = "\n".join(
+                f"· {self._model_labels.get(k, k)}: {v}" for k, v in missing
+            )
+            QMessageBox.warning(
+                self, "설치되지 않은 모델",
+                "워크플로가 지정한 모델이 ComfyUI 에 없습니다:\n\n"
+                f"{names}\n\n"
+                "Model 탭에서 ComfyUI 에 설치된 모델을 선택하거나,\n"
+                "workflows/ 의 워크플로 JSON 에 적힌 모델 이름을 확인해 주세요."
+            )
+            return
+
         self.progress.setValue(0); self.generate.setEnabled(False)
         try:
             req = self.engine.build_request(
@@ -680,8 +809,7 @@ class MainWindow(QWidget):
                 self.preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
         self.status.setText(f"완료: {Path(path).name}")
         self.log.append(f"저장: {path}\nPrompt: {meta.get('prompt','')}")
-        if hasattr(self, 'output_browser'): self.output_browser._refresh_list()
-        if hasattr(self, 'session_browser'): self.session_browser._refresh_list()
+        if hasattr(self, 'history_browser'): self.history_browser._refresh_list()
 
     def fail(self, msg, suggestion=None):
         """실패 처리.
