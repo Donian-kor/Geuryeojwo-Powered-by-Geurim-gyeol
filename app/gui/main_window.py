@@ -586,17 +586,6 @@ class MainWindow(QWidget):
         )
         self.enhance.setVisible(has_enhancer)
 
-    def _setup_models(self, params: dict, defaults: dict) -> None:
-        """모델 선택 드롭다운을 워크플로에 맞춘다.
-
-        워크플로에 없는 모델 종류는 비활성화한다.
-        ComfyUI 오프라인이면 워크플로 기본값만 보여준다.
-
-        워크플로가 지정한 모델이 ComfyUI 목록에 없으면 목록의
-        다른 파일로 대체하지 않는다. 목록에 없는 이름을 그대로
-        넣고 빨간색으로 표시한다. 대체해 버리면 사용자도 모르는 채
-        잘못된 모델로 생성된다.
-        """
     def _setup_models(self, params: dict, defaults: dict,
                       preserve_selection: bool = False) -> None:
         """모델 선택 드롭다운을 워크플로에 맞춘다.
