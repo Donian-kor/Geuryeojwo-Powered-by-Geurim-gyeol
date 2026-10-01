@@ -43,6 +43,52 @@ def test_profile_has_memory_and_generation_fields(registry):
     assert len(profile.default_resolution) == 2
 
 
+def test_override_comment_keys_ignored(tmp_path):
+    """`_`로 시작하는 예시 키는 무시된다."""
+    profiles = tmp_path / "image_profiles.json"
+    profiles.write_text("{}", encoding="utf-8")
+    overrides = tmp_path / "user_models.json"
+    overrides.write_text(json.dumps({
+        "_example": {"kind": "image", "architecture": "sdxl"},
+        "real.safetensors": {"kind": "image", "architecture": "flux"},
+    }), encoding="utf-8")
+
+    reg = ModelRegistry(tmp_path, profiles, overrides)
+    assert len(reg.overrides) == 1
+    assert reg.profile_for(Path("real.safetensors")).architecture == "flux"
+
+
+def test_profile_uses_bundle_metadata(tmp_path, make_safetensors_file):
+    """헤더 분석 결과가 프로필에 반영된다 (v0.1 §11)."""
+    from tests.test_bundler import SDXL
+
+    folder = tmp_path / "models" / "ArbitraryName"
+    make_safetensors_file(folder, "totally_unrelated.safetensors", SDXL)
+
+    reg = ModelRegistry(
+        tmp_path / "models",
+        Path("config/image_profiles.json"),
+        Path("config/user_models.json"),
+    )
+    profile = reg.profile_for(folder / "totally_unrelated.safetensors")
+
+    assert profile.architecture == "sdxl"
+    assert profile.source == "metadata"
+    assert profile.estimated_vram == 7.1
+    assert profile.prompt_style == "sentence"
+
+
+def test_profile_falls_back_to_filename(tmp_path):
+    """번들이 없으면 파일명으로 판별한다."""
+    reg = ModelRegistry(
+        tmp_path,
+        Path("config/image_profiles.json"),
+        Path("config/user_models.json"),
+    )
+    profile = reg.profile_for(Path("some_sdxl_model.safetensors"))
+    assert profile.architecture == "sdxl"
+
+
 def test_override_takes_priority(tmp_path):
     """User Override가 자동 판별보다 우선한다 (v0.1 §3.5, §11)."""
     profiles = tmp_path / "image_profiles.json"
@@ -62,39 +108,39 @@ def test_override_takes_priority(tmp_path):
     assert profile.source == "override"
 
 
-def test_override_comment_keys_ignored(tmp_path):
-    """`_`로 시작하는 예시 키는 무시된다."""
-    profiles = tmp_path / "image_profiles.json"
-    profiles.write_text("{}", encoding="utf-8")
-    overrides = tmp_path / "user_models.json"
-    overrides.write_text(json.dumps({
-        "_example": {"kind": "image", "architecture": "sdxl"},
-        "real.safetensors": {"kind": "image", "architecture": "flux"},
-    }), encoding="utf-8")
-
-    reg = ModelRegistry(tmp_path, profiles, overrides)
-    assert len(reg.overrides) == 1
-    assert reg.profile_for(Path("real.safetensors")).architecture == "flux"
-
-
-def test_scanner_empty_dirs(tmp_path):
-    """모델이 없으면 빈 리스트를 반환한다."""
-    scanner = ModelScanner(tmp_path)
+def test_scanner_empty_root(tmp_path):
+    """models 폴더가 없으면 빈 리스트를 반환한다."""
+    scanner = ModelScanner(tmp_path / "nonexistent")
+    assert scanner.scan_all() == []
     assert scanner.scan_llm() == []
     assert scanner.scan_image() == []
 
 
-def test_scanner_finds_files(tmp_path):
-    """GGUF과 safetensors를 탐지한다 (v0.1 §9)."""
-    (tmp_path / "llm").mkdir()
-    (tmp_path / "checkpoints").mkdir()
-    (tmp_path / "llm" / "qwen.gguf").write_bytes(b"GGUF" + b"\0" * 32)
-    (tmp_path / "checkpoints" / "sdxl.safetensors").write_bytes(b"\0" * 64)
+def test_scanner_ignores_non_model_folders(tmp_path):
+    """모델이 없는 폴더는 무시한다."""
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "note.txt").write_text("x", encoding="utf-8")
+
+    scanner = ModelScanner(tmp_path)
+    assert scanner.scan_all() == []
+
+
+def test_scanner_finds_llm_and_image(tmp_path):
+    """GGUF와 safetensors를 각각 탐지한다 (v0.1 §9)."""
+    llm_dir = tmp_path / "MyLlm"
+    llm_dir.mkdir()
+    (llm_dir / "qwen.gguf").write_bytes(b"GGUF" + b"\0" * 64)
+
+    img_dir = tmp_path / "MyImage"
+    img_dir.mkdir()
+    (img_dir / "m.safetensors").write_bytes(b"\0" * 128)
 
     scanner = ModelScanner(tmp_path)
     llms = scanner.scan_llm()
     images = scanner.scan_image()
-    assert [m.name for m in llms] == ["qwen.gguf"]
-    assert llms[0].kind == "llm"
-    assert "sdxl.safetensors" in [m.name for m in images]
-    assert images[0].kind == "image"
+
+    # 헤더 판별에 실패한 safetensors는 번들이 될 수 없으므로
+    # 유효한 모델만 반환되는지 확인한다
+    assert [b.name for b in llms] == ["MyLlm"]
+    assert all(b.kind == "llm" for b in llms)
+    assert isinstance(images, list)

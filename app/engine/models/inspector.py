@@ -139,7 +139,7 @@ def _detect_unet_arch(keys: list[str], shapes: dict[str, list[int]]) -> str:
     return "unknown"
 
 
-def _arch_from_model_index(folder: Path) -> str:
+def arch_from_model_index(folder: Path) -> str:
     """Diffusers 폴더의 아키텍처를 model_index.json에서 읽는다."""
     import json
 
@@ -157,6 +157,10 @@ def _arch_from_model_index(folder: Path) -> str:
         return "unknown"
     except Exception:
         return "unknown"
+
+
+# 이전 내부 이름과의 호환
+_arch_from_model_index = arch_from_model_index
 
 
 def inspect_file(path: Path) -> FileInspection:

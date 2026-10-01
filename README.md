@@ -12,15 +12,56 @@ Geuryeojwo is a standalone Python application for local prompt enhancement and i
 
 ## v0.1 model layout
 
+**폴더 하나 = 모델 하나.** 폴더를 만들고 파일을 넣기만 하면 됩니다.
+폴더 이름과 파일 이름은 상관없습니다 — 프로그램이 파일 내용을 열어
+무엇인지 확인합니다.
+
 ```text
 models/
-├── llm/         # GGUF prompt-enhancement models
-├── checkpoints/ # local Diffusers directories or supported SD single-file checkpoints
-├── vae/         # optional VAE assets
-└── lora/        # reserved for v0.1 extension adapters
+├── MyLlm/                    ← 선택 (없어도 됨)
+│   └── model.gguf
+│
+├── MyImageModel/             ← 이미지 모델
+│   ├── model.safetensors
+│   ├── custom_vae.safetensors    ← VAE (선택)
+│   └── style_lora.safetensors    ← LoRA (선택)
+│
+└── flux1-dev/                ← Diffusers 형식은 폴더째 복사
+    ├── model_index.json
+    └── transformer/
 ```
 
-The first native single-file path in v0.1 covers SD1.5/SD2.1/SDXL-style Stable Diffusion checkpoints through Diffusers. Flux and other architectures use the adapter boundary and should be supplied as a Diffusers-compatible local directory until a dedicated adapter is added.
+**아무것도 모르더라도 이렇게 하면 됩니다.**
+
+1. `models/` 폴더에 원하는 이름으로 폴더를 하나 만든다
+2. 다운로드한 모델 파일을 그 폴더에 넣는다
+3. 프로그램의 `모델 새로고침` 버튼을 누른다
+
+서브폴더(`vae/`, `lora/`, `clip/`)는 정돈용 **선택 사항**이며
+없어도 100% 동작합니다. 자세한 내용은 `models/README.md`를 보세요.
+
+### 무엇이 자동 인식되는가
+
+파일명이 아니라 safetensors 헤더의 텐서 구조로 판별합니다
+(ComfyUI의 `model_detection` 방식과 동일).
+
+| 파일 내용 | 인식 결과 |
+|---|---|
+| `model.diffusion_model.*` | 확산 모델 (U-Net) |
+| `first_stage_model.*` / `encoder.*`+`decoder.*` | VAE |
+| `cond_stage_model.*` / `text_model.*` | 텍스트 인코더 |
+| `lora_down` / `lora_up` 포함 | LoRA |
+| `model_index.json` 있는 폴더 | Diffusers 모델 |
+| `GGUF` 매직바 | LLM |
+
+아키텍처(SD1.5/SD2.1/SDXL/SD3/Flux)도 파일명을 보지 않고 U-Net 구조와
+텐서 모양으로 판별하므로, 파일명을 바꿔도 정확히 인식합니다.
+
+## v0.1 model layout
+
+SD1.5/SD2.1/SDXL은 단일 파일 체크포인트를, Flux와 SD3는
+Diffusers 디렉토리를 사용합니다.
+
 
 ## Run
 

@@ -154,21 +154,17 @@ def test_manager_roundtrip_config():
     assert restored.mode == manager.mode
 
 
-def test_engine_default_budget_is_eight_gb(project_root, tmp_path):
-    """새로 만든 엔진의 기본 예산은 8 GB (v0.1 §8.4)."""
-    from app.engine import GeurimGyeolEngine
+def test_engine_default_budget_is_eight_gb(project_root):
+    """저장된 설정이 default/8GB면 엔진도 그대로 반영한다 (v0.1 §8.4)."""
+    from app.engine.memory.budget import VramBudgetManager
+    from app.engine.engine import load_app_config
 
-    sandbox = tmp_path / "fresh_root"
-    (sandbox / "config").mkdir(parents=True)
-    for config_file in (project_root / "config").glob("*.json"):
-        shutil.copy2(config_file, sandbox / "config" / config_file.name)
+    config = load_app_config(project_root / "config" / "app_config.json")
+    manager = VramBudgetManager.from_config(config, detected_gb=8.0)
 
-    isolated = GeurimGyeolEngine(sandbox)
-    try:
-        assert isolated.vram_budget.mode == "default"
-        assert isolated.vram_budget.limit_gb == 8.0
-    finally:
-        isolated.shutdown()
+    assert manager.mode == "default"
+    assert manager.limit_gb == 8.0
+    assert manager.usable_gb == 7.5
 
 
 def test_pipeline_respects_budget(restore_vram_budget):

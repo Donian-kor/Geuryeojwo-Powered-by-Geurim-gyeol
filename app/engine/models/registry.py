@@ -4,7 +4,8 @@ import json
 from pathlib import Path
 
 from .profile import ModelProfile
-from .scanner import ModelScanner, ScannedModel
+from .scanner import ModelScanner
+from .bundler import ModelBundle
 
 
 class ModelRegistry:
@@ -67,17 +68,29 @@ class ModelRegistry:
         self.overrides = self._load_overrides()
         return self.overrides[filename]
 
-    def scan_llm(self) -> list[ScannedModel]:
-        """LLM 모델 스캔 (scanner 위임)."""
+    def scan_llm(self) -> list[ModelBundle]:
+        """LLM 번들을 스캔한다 (scanner 위임)."""
         return self.scanner.scan_llm()
 
-    def scan_image(self) -> list[ScannedModel]:
-        """이미지 모델 스캔 (scanner 위임)."""
+    def scan_image(self) -> list[ModelBundle]:
+        """이미지 모델 번들을 스캔한다 (scanner 위임)."""
         return self.scanner.scan_image()
 
     def profile_for(self, path: Path) -> ModelProfile:
-        """모델 경로로부터 아키텍처 프로필을 결정한다 (v0.1 §11)."""
+        """모델 경로로부터 아키텍처 프로필을 결정한다 (v0.1 §11).
+
+        번들의 헤더 분석 결과가 있으면 그것이 가장 정확하므로 우선한다.
+        번들을 찾을 수 없을 때만 파일명으로 판별한다.
+        """
+        path = Path(path)
         name = path.name.lower()
+
+        # 0. 헤더 분석 결과 (safetensors 내용 기반 판별)
+        bundle = self._bundle_for(path)
+        if bundle is not None and bundle.architecture != "unknown":
+            return self._profile_from_architecture(
+                bundle.architecture, bundle.name, source="metadata"
+            )
 
         # 1. User Override (최우선)
         for key, profile in self.overrides.items():
@@ -91,6 +104,46 @@ class ModelRegistry:
 
         # 5. Filename Heuristic
         return self._heuristic_profile(path)
+
+    def _bundle_for(self, path: Path):
+        """경로가 속한 번들을 찾는다 (실패 시 None)."""
+        try:
+            return self.scanner.find_bundle(path)
+        except Exception:
+            return None
+
+    def _profile_from_architecture(
+        self, architecture: str, name: str, source: str = "metadata"
+    ) -> ModelProfile:
+        """아키텍처로부터 프로필을 만든다 (설정값을 우선 사용)."""
+        configured = self.profiles.get(architecture)
+        if configured is not None:
+            return ModelProfile(
+                name=name,
+                kind=configured.kind,
+                architecture=configured.architecture,
+                prompt_style=configured.prompt_style,
+                use_negative=configured.use_negative,
+                loader=configured.loader,
+                estimated_vram=configured.estimated_vram,
+                default_steps=configured.default_steps,
+                default_resolution=tuple(configured.default_resolution),
+                sampler=configured.sampler,
+                scheduler=configured.scheduler,
+                source=source,
+            )
+
+        # 설정에 없으면 아키텍처에서 유추
+        style = "tag" if architecture in ("sd15", "sd21") else "sentence"
+        negative = architecture not in ("flux", "sd3")
+        return ModelProfile(
+            name=name,
+            kind="image",
+            architecture=architecture,
+            prompt_style=style,
+            use_negative=negative,
+            source=source,
+        )
 
     def _heuristic_profile(self, path: Path) -> ModelProfile:
         """파일명 휴리스틱 아키텍처 판별 (v0.1 §11 5순위)."""

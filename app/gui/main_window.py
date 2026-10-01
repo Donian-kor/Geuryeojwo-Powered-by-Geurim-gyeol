@@ -401,7 +401,7 @@ class MainWindow(QWidget):
         """Prompt Preview에서 Generate 요청."""
         if self.worker and self.worker.isRunning(): return
         if self.image.currentData() is None:
-            QMessageBox.warning(self,"모델 필요","models/checkpoints에 이미지 모델을 넣어주세요."); return
+            QMessageBox.warning(self,"모델 필요","models 폴더에 모델을 하나 폴더째 넣어주세요."); return
         self.progress.setValue(0); self.generate.setEnabled(False)
         llm_data = self.llm.currentData()
         req=GenerationRequest(original, Path(llm_data) if llm_data else None, Path(self.image.currentData()), negative, self.w.value(), self.h.value(), self.steps.value(), self.cfg.value(), self.seed.value())
@@ -409,22 +409,33 @@ class MainWindow(QWidget):
         self.worker=Worker(self.engine.generation, req); self.worker.progress.connect(lambda v,m:(self.progress.setValue(v),self.status.setText(m),self.log.append(m))); self.worker.done.connect(self.done); self.worker.failed.connect(self.fail); self.worker.start()
 
     def refresh_models(self):
-        self.llm.clear(); self.image.clear(); llms, images=self.engine.scan_models()
-        for p in llms: self.llm.addItem(p.name, str(p))
+        """models/ 폴더를 스캔해 드롭다운을 채운다 (v0.1 §9)."""
+        self.llm.clear(); self.image.clear()
+        llms, images = self.engine.scan_models()
+        for bundle in llms:
+            if bundle.load_target:
+                self.llm.addItem(f"{bundle.name} (LLM)", str(bundle.load_target))
         self.llm.addItem("사용 안 함 (fallback)", None)
-        for p in images: self.image.addItem(p.name, str(p))
+        for bundle in images:
+            if bundle.load_target:
+                self.image.addItem(bundle.describe(), str(bundle.load_target))
         self.status.setText(f"LLM {len(llms)}개 / 이미지 모델 {len(images)}개 발견")
         self.llm_count.setText(f"LLM: {len(llms)} found")
         self.image_count.setText(f"Image: {len(images)} found")
         if images:
-            arch = "sdxl" if "sdxl" in images[0].name.lower() else ("flux" if "flux" in images[0].name.lower() else "sd15")
-            self.prompt_preview.set_model(arch, self.llm.currentData() if self.llm.currentData() else None)
+            # 프로필로 아키텍처를 정확히 조회 (파일명 추정이 아님)
+            target = images[0].load_target
+            if target:
+                arch = self.engine.registry.profile_for(target).architecture
+                self.prompt_preview.set_model(
+                    arch, self.llm.currentData() if self.llm.currentData() else None
+                )
         self.model_info.refresh(self.image.currentData())
 
     def start(self):
         if self.worker and self.worker.isRunning(): return
         if self.image.currentData() is None:
-            QMessageBox.warning(self,"모델 필요","models/checkpoints에 이미지 모델을 넣어주세요."); return
+            QMessageBox.warning(self,"모델 필요","models 폴더에 모델을 하나 폴더째 넣어주세요."); return
         prompt=self.prompt.toPlainText().strip()
         if not prompt: QMessageBox.warning(self,"입력 필요","프롬프트를 입력해주세요."); return
         self.progress.setValue(0); self.generate.setEnabled(False)

@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 
 import pytest
+import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -57,3 +58,27 @@ def tmp_outputs(tmp_path):
     outputs.mkdir()
     sessions.mkdir()
     return outputs, sessions
+
+
+@pytest.fixture
+def models_root(tmp_path):
+    """모델 폴더 구조를 만들 수 있는 빈 루트."""
+    root = tmp_path / "models"
+    root.mkdir()
+    return root
+
+
+@pytest.fixture
+def make_safetensors_file():
+    """헤더만 가진 가짜 safetensors를 지정 폴더에 만든다."""
+
+    def _make(folder: Path, name: str, spec) -> Path:
+        from safetensors.torch import save_file
+
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / name
+        tensors = {k: torch.zeros(*shape, dtype=torch.float16) for k, shape in spec}
+        save_file(tensors, str(path))
+        return path
+
+    return _make

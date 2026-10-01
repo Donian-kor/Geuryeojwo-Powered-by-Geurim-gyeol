@@ -5,10 +5,8 @@ __pycache__/
 outputs/*
 sessions/*
 models/*
-!models/llm/.gitkeep
-!models/checkpoints/.gitkeep
-!models/vae/.gitkeep
-!models/lora/.gitkeep
+!models/README.md
+!models/.gitkeep
 *.log
 .pytest_cache/
 _out.txt
