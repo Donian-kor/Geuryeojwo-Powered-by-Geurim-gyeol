@@ -10,3 +10,5 @@ models/*
 *.log
 .pytest_cache/
 _out.txt
+_c3.txt
+_c3e.txt
