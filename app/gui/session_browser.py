@@ -92,7 +92,7 @@ class SessionHistoryBrowser(QWidget):
 
         self.image_preview = QLabel("이미지를 선택해주세요")
         self.image_preview.setAlignment(Qt.AlignCenter)
-        self.image_preview.setMinimumSize(400, 400)
+        self.image_preview.setMinimumSize(220, 180)
         self.image_preview.setStyleSheet("border: 1px solid #444; background: #222; color: #888;")
         right_layout.addWidget(self.image_preview, 3)
 

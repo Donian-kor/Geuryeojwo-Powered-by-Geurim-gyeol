@@ -6,7 +6,8 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit,
     QComboBox, QSpinBox, QDoubleSpinBox, QPushButton, QProgressBar,
-    QMessageBox, QFormLayout, QGroupBox, QTabWidget, QDialog,
+    QMessageBox, QFormLayout, QGroupBox, QTabWidget, QDialog, QSizePolicy,
+    QGridLayout,
 )
 from app.engine import GeurimGyeolEngine
 from app.engine.generation.controller import GenerationRequest, GenerationResult
@@ -76,7 +77,7 @@ class ModelInfoPanel(QGroupBox):
         self.refresh()
 
     def _build_ui(self) -> None:
-        layout = QFormLayout(self)
+        layout = QGridLayout(self); layout.setHorizontalSpacing(10); layout.setVerticalSpacing(1)
         self.model_label = QLabel("-")
         self.arch_label = QLabel("-")
         self.style_label = QLabel("-")
@@ -88,18 +89,25 @@ class ModelInfoPanel(QGroupBox):
         self.strategy_label = QLabel("-")
         self.device_label = QLabel("-")
         self.status_label = QLabel("-")
+        self.device_label.setVisible(False)  # 상단 요약줄에 표시됨
 
-        layout.addRow("Model:", self.model_label)
-        layout.addRow("Architecture:", self.arch_label)
-        layout.addRow("Prompt Style:", self.style_label)
-        layout.addRow("Negative Prompt:", self.negative_label)
-        layout.addRow("Estimated VRAM:", self.est_vram_label)
-        layout.addRow("Available VRAM:", self.avail_vram_label)
-        layout.addRow("System RAM:", self.ram_label)
-        layout.addRow("VRAM Budget:", self.budget_label)
-        layout.addRow("Memory Strategy:", self.strategy_label)
-        layout.addRow("Device:", self.device_label)
-        layout.addRow("Status:", self.status_label)
+        def _cell(caption: str, label: QLabel, row: int, col: int) -> None:
+            cap = QLabel(caption)
+            cap.setStyleSheet("color:#a0a0a0; font-size:11px;")
+            label.setStyleSheet("font-size:12px;")
+            layout.addWidget(cap, row * 2, col)
+            layout.addWidget(label, row * 2 + 1, col)
+
+        _cell("Model", self.model_label, 0, 0)
+        _cell("Arch", self.arch_label, 0, 1)
+        _cell("Style", self.style_label, 1, 0)
+        _cell("Negative", self.negative_label, 1, 1)
+        _cell("Est. VRAM", self.est_vram_label, 2, 0)
+        _cell("Avail. VRAM", self.avail_vram_label, 2, 1)
+        _cell("RAM", self.ram_label, 3, 0)
+        _cell("Budget", self.budget_label, 3, 1)
+        _cell("Strategy", self.strategy_label, 4, 0)
+        layout.addWidget(self.status_label, 9, 0, 1, 2)
 
     def refresh(self, model_path: str | None = None) -> None:
         """모델 정보를 갱신한다. model_path가 없으면 현재 메모리만 갱신한다."""
@@ -165,42 +173,63 @@ class ModelInfoPanel(QGroupBox):
 
 class MainWindow(QWidget):
     def __init__(self):
-        super().__init__(); self.setWindowTitle("그려줘 v0.1 — Geuryeojwo"); self.resize(1180, 820)
+        super().__init__()
+        self.setWindowTitle("그려줘 v0.1 — Geuryeojwo")
+        self._fit_to_screen()
+        self.setMinimumSize(900, 520)
         self.engine=GeurimGyeolEngine(ROOT); self.engine.initialize(); self.worker=None
         self.theme_manager=ThemeManager(QApplication.instance(), ROOT / "config" / "theme_config.json"); self.theme_manager.apply_theme()
         self.build_ui(); self.refresh_models()
 
-    def build_ui(self):
-        root=QVBoxLayout(self)
-        title=QLabel("그려줘 v0.1"); title.setStyleSheet("font-size:28px;font-weight:700"); root.addWidget(title)
-        sub=QLabel("Local AI Image Studio  ·  Powered by Geurim-gyeol"); root.addWidget(sub)
-        
-        hw_box=QGroupBox("System Information"); hw_layout=QFormLayout(hw_box)
-        self.hw_label=QLabel(f"Backend: {self.engine.hardware.backend}"); hw_layout.addRow("Backend:",self.hw_label)
-        self.hw_name=QLabel(f"Device: {self.engine.hardware.name}"); hw_layout.addRow("Device:",self.hw_name)
-        self.hw_dtype=QLabel(f"Precision: {self.engine.hardware.dtype}"); hw_layout.addRow("Precision:",self.hw_dtype)
-        vram=self.engine.hardware.vram_gb
-        self.hw_vram=QLabel(f"VRAM: {vram:.1f} GB" if vram else "N/A (CPU 모드)"); hw_layout.addRow("VRAM:",self.hw_vram)
-        self.llm_count=QLabel(f"LLM: {len(self.engine.registry.scan_llm())} found"); hw_layout.addRow("Models:",self.llm_count)
-        self.image_count=QLabel(f"Image: {len(self.engine.registry.scan_image())} found"); hw_layout.addRow("",self.image_count)
-        root.addWidget(hw_box)
+    def _fit_to_screen(self):
+        """창이 화면보다 크지 않도록 초기 크기를 정한다."""
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            self.resize(1180, 800)
+            return
+        available = screen.availableGeometry()
+        width = min(1280, int(available.width() * 0.92))
+        height = min(860, int(available.height() * 0.90))
+        self.resize(max(900, width), max(520, height))
 
+    def build_ui(self):
+        root=QVBoxLayout(self); root.setContentsMargins(8,6,8,6); root.setSpacing(6)
+
+        # 상단: 제목 + 상태 요약 + 버튼을 한 줄로 압축
+        top=QHBoxLayout(); top.setSpacing(10)
+        title=QLabel("그려줘 v0.1"); title.setStyleSheet("font-size:18px;font-weight:700")
+        top.addWidget(title)
+        top.addWidget(QLabel("Local AI Image Studio · Powered by Geurim-gyeol"))
+        top.addStretch()
+
+        vram=self.engine.hardware.vram_gb
+        hw_summary=(f"{self.engine.hardware.backend} · {self.engine.hardware.name} · "
+                    f"float16" if self.engine.hardware.dtype=="float16" else
+                    f"{self.engine.hardware.backend} · {self.engine.hardware.name} · float32")
+        if vram: hw_summary += f" · VRAM {vram:.1f}GB"
+        hw_label=QLabel(hw_summary); hw_label.setStyleSheet("color:#a0a0a0;")
+        top.addWidget(hw_label)
+
+        self.dry_run_btn=QPushButton("환경 검사"); self.dry_run_btn.clicked.connect(self._run_dry_run)
+        self.theme_toggle=QPushButton("테마"); self.theme_toggle.clicked.connect(self._toggle_theme)
+        top.addWidget(self.dry_run_btn); top.addWidget(self.theme_toggle)
+        root.addLayout(top)
+
+        # VRAM 한도: 같은 줄에 인라인으로 배치
+        root.addLayout(self._build_vram_row())
+
+        # 하드웨어 경고가 있을 때만 표시 (평소에는 공간 안 차지 않음)
         hw_warning=self.engine.hardware.warning
         if hw_warning:
-            warn_box=QGroupBox("⚠ 하드웨어 경고"); warn_layout=QVBoxLayout(warn_box)
-            warn=QLabel(hw_warning); warn.setWordWrap(True)
-            warn.setStyleSheet("color:#ffd93d;")
-            warn_layout.addWidget(warn); root.addWidget(warn_box)
+            warn=QLabel("⚠ " + hw_warning.replace("\n"," "))
+            warn.setWordWrap(True); warn.setStyleSheet("color:#ffd93d; font-size:12px;")
+            root.addWidget(warn)
             self.log_warning=hw_warning
-        
-        btns=QHBoxLayout()
-        self.theme_toggle=QPushButton("다크/라이트 전환"); self.theme_toggle.clicked.connect(self._toggle_theme)
-        self.dry_run_btn=QPushButton("환경 검사 (Dry Run)"); self.dry_run_btn.clicked.connect(self._run_dry_run)
-        btns.addWidget(self.theme_toggle); btns.addWidget(self.dry_run_btn); btns.addStretch()
-        root.addLayout(btns)
-        root.addWidget(self._build_vram_box())
 
-        tabs=QTabWidget(); root.addWidget(tabs)
+        # 모델 수를 상태바로 이동 (별도 GroupBox 제거)
+        self.llm_count=QLabel(""); self.image_count=QLabel("")
+
+        tabs=QTabWidget(); root.addWidget(tabs, 1)
         tabs.addTab(self._build_preview_tab(), "Prompt Preview")
         tabs.addTab(self._build_generate_tab(), "Generate")
         tabs.addTab(self._build_output_tab(), "Output Browser")
@@ -218,43 +247,38 @@ class MainWindow(QWidget):
         root.addLayout(status_bar)
         self._mem_timer=QTimer(); self._mem_timer.timeout.connect(self._update_status_bar); self._mem_timer.start(1000)
 
-    def _build_vram_box(self) -> QGroupBox:
-        """VRAM 한도 설정 UI (v0.1 §8.4).
-
-        기본값은 보수적 8 GB이며, 자동 감지 / 사용자 지정 / 제한 없음으로
-        변경할 수 있다.
-        """
-        box=QGroupBox("VRAM 한도"); layout=QVBoxLayout(box)
-        row=QHBoxLayout()
+    def _build_vram_row(self) -> QHBoxLayout:
+        """VRAM 한도 설정을 한 줄로 배치한다 (v0.1 §8.4)."""
+        row=QHBoxLayout(); row.setSpacing(6)
+        label=QLabel("VRAM 한도:"); label.setStyleSheet("font-weight:bold;")
+        row.addWidget(label)
 
         self.vram_mode=QComboBox()
         self.vram_mode.addItem("기본값 (8 GB, 보수적)", "default")
-        self.vram_mode.addItem("자동 감지 (내 GPU에 맞춤)", "auto")
+        self.vram_mode.addItem("자동 감지 (내 GPU)", "auto")
         self.vram_mode.addItem("사용자 지정", "custom")
-        self.vram_mode.addItem("제한 없음 (고사양 PC)", "unlimited")
+        self.vram_mode.addItem("제한 없음", "unlimited")
 
         current=self.engine.vram_budget.mode
-        index=self.vram_mode.findData(current)
-        self.vram_mode.setCurrentIndex(max(0, index))
+        self.vram_mode.setCurrentIndex(max(0, self.vram_mode.findData(current)))
 
         self.vram_value=QDoubleSpinBox()
         self.vram_value.setRange(1.0, 128.0); self.vram_value.setSingleStep(0.5)
         self.vram_value.setValue(self.engine.vram_budget.custom_gb or 8.0)
         self.vram_value.setSuffix(" GB")
+        self.vram_value.setFixedWidth(80)
         self.vram_value.setEnabled(current == "custom")
-
-        row.addWidget(QLabel("기준:"))
-        row.addWidget(self.vram_mode, 1)
-        row.addWidget(self.vram_value)
-        layout.addLayout(row)
-
-        self.vram_mode.currentIndexChanged.connect(self._on_vram_mode_changed)
-        self.vram_value.valueChanged.connect(self._apply_vram_limit)
 
         self.vram_info=QLabel(self.engine.vram_budget.describe())
         self.vram_info.setStyleSheet("color:#a0a0a0; font-size:12px;")
-        layout.addWidget(self.vram_info)
-        return box
+
+        row.addWidget(self.vram_mode)
+        row.addWidget(self.vram_value)
+        row.addWidget(self.vram_info, 1)
+
+        self.vram_mode.currentIndexChanged.connect(self._on_vram_mode_changed)
+        self.vram_value.valueChanged.connect(self._apply_vram_limit)
+        return row
 
     def _on_vram_mode_changed(self) -> None:
         """모드 변경 시 custom 입력란을 활성화한다."""
@@ -281,23 +305,36 @@ class MainWindow(QWidget):
         tab=QWidget(); layout=QVBoxLayout(tab)
         body=QHBoxLayout(); layout.addLayout(body)
         left=QVBoxLayout(); body.addLayout(left,1); right=QVBoxLayout(); body.addLayout(right,1)
-        models=QGroupBox("Models"); form=QFormLayout(models)
-        self.llm=QComboBox(); self.image=QComboBox(); form.addRow("Local LLM (GGUF)",self.llm); form.addRow("Image Model",self.image); left.addWidget(models)
+        models=QGroupBox("Models"); form=QHBoxLayout(models); form.setSpacing(4)
+        self.llm=QComboBox(); self.image=QComboBox()
+        form.addWidget(QLabel("LLM")); form.addWidget(self.llm, 1)
+        form.addWidget(QLabel("Image")); form.addWidget(self.image, 1)
+        left.addWidget(models)
         self.model_info=ModelInfoPanel(self.engine); left.addWidget(self.model_info)
         self.image.currentIndexChanged.connect(lambda _: self.model_info.refresh(self.image.currentData()))
-        promptbox=QGroupBox("Prompt"); pl=QVBoxLayout(promptbox); self.prompt=QTextEdit(); self.prompt.setPlaceholderText("무엇을 그리고 싶나요?"); self.prompt.setMinimumHeight(150); pl.addWidget(self.prompt); left.addWidget(promptbox)
-        params=QGroupBox("Generation"); pf=QFormLayout(params)
+        promptbox=QGroupBox("Prompt"); pl=QVBoxLayout(promptbox); self.prompt=QTextEdit(); self.prompt.setPlaceholderText("무엇을 그리고 싶나요?"); self.prompt.setMinimumHeight(90); pl.addWidget(self.prompt); left.addWidget(promptbox)
+        params=QGroupBox("Generation"); pf=QHBoxLayout(params); pf.setSpacing(4)
         self.w=QSpinBox(); self.w.setRange(64,4096); self.w.setValue(1024); self.w.setSingleStep(64)
         self.h=QSpinBox(); self.h.setRange(64,4096); self.h.setValue(1024); self.h.setSingleStep(64)
         self.steps=QSpinBox(); self.steps.setRange(1,100); self.steps.setValue(20)
         self.cfg=QDoubleSpinBox(); self.cfg.setRange(0,30); self.cfg.setValue(7); self.cfg.setSingleStep(.1)
         self.seed=QSpinBox(); self.seed.setRange(-1,2147483647); self.seed.setValue(-1)
-        self.neg=QTextEdit(); self.neg.setMaximumHeight(70)
-        pf.addRow("Width",self.w); pf.addRow("Height",self.h); pf.addRow("Steps",self.steps); pf.addRow("CFG",self.cfg); pf.addRow("Seed",self.seed); pf.addRow("Negative (optional)",self.neg); left.addWidget(params)
+
+        def _field(caption, widget):
+            """라벨 위 입력칸 세로 배치."""
+            box=QVBoxLayout(); box.setSpacing(1)
+            lbl=QLabel(caption); lbl.setStyleSheet("color:#a0a0a0; font-size:11px;")
+            box.addWidget(lbl); box.addWidget(widget); return box
+
+        for cap, wdg in (("W",self.w),("H",self.h),("Steps",self.steps),("CFG",self.cfg),("Seed",self.seed)):
+            pf.addLayout(_field(cap,wdg))
+        left.addWidget(params)
+        self.neg=QTextEdit(); self.neg.setPlaceholderText("Negative prompt (선택)"); self.neg.setFixedHeight(46)
+        left.addWidget(self.neg)
         buttons=QHBoxLayout(); self.generate=QPushButton("그려줘"); self.cancel=QPushButton("중지"); self.refresh=QPushButton("모델 새로고침"); buttons.addWidget(self.generate); buttons.addWidget(self.cancel); buttons.addWidget(self.refresh); left.addLayout(buttons)
         self.progress=QProgressBar(); left.addWidget(self.progress); self.status=QLabel("준비됨"); left.addWidget(self.status)
         self.log=QTextEdit(); self.log.setReadOnly(True)
-        right.addWidget(QLabel("Result")); self.preview=QLabel("생성된 이미지가 여기에 표시됩니다."); self.preview.setAlignment(Qt.AlignCenter); self.preview.setMinimumSize(500,500); self.preview.setStyleSheet("border:1px solid #444"); right.addWidget(self.preview,1); right.addWidget(QLabel("Engine Log")); right.addWidget(self.log,1)
+        right.addWidget(QLabel("Result")); self.preview=QLabel("생성된 이미지가 여기에 표시됩니다."); self.preview.setAlignment(Qt.AlignCenter); self.preview.setStyleSheet("border:1px solid #444"); self.preview.setMinimumHeight(160); self.preview.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored); right.addWidget(self.preview,1); right.addWidget(QLabel("Engine Log")); self.log.setMaximumHeight(140); right.addWidget(self.log)
         self.generate.clicked.connect(self.start); self.cancel.clicked.connect(self.stop); self.refresh.clicked.connect(self.refresh_models)
         return tab
 
@@ -444,7 +481,13 @@ class MainWindow(QWidget):
 
     def stop(self): self.engine.generation.cancel(); self.status.setText("중지 요청됨")
     def done(self,path,meta):
-        self.generate.setEnabled(True); self.preview.setPixmap(QPixmap(path).scaled(self.preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)); self.status.setText(f"완료: {path}"); self.log.append(f"저장: {path}\nPrompt: {meta['prompt']}")
+        self.generate.setEnabled(True)
+        pixmap=QPixmap(path)
+        if not pixmap.isNull():
+            self.preview.setPixmap(pixmap.scaled(
+                self.preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.status.setText(f"완료: {Path(path).name}")
+        self.log.append(f"저장: {path}\nPrompt: {meta['prompt']}")
         if hasattr(self, 'output_browser'): self.output_browser._refresh_list()
         if hasattr(self, 'session_browser'): self.session_browser._refresh_list()
 
