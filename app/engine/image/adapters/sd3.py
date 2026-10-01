@@ -15,7 +15,7 @@ class SD3Adapter(ImageModelAdapter):
     architecture = "sd3"
     supports_negative_prompt = False
 
-    def load(self, model_path: Path) -> None:
+    def load(self, model_path: Path, offload_mode=None) -> None:
         try:
             import torch
             from diffusers import StableDiffusion3Pipeline
@@ -25,15 +25,12 @@ class SD3Adapter(ImageModelAdapter):
             ) from e
 
         dtype = self._dtype()
-        device = self.hardware.device
         self.pipe = StableDiffusion3Pipeline.from_pretrained(
             str(model_path),
             torch_dtype=dtype,
             local_files_only=True,
         )
-        self.pipe = self.pipe.to(device)
-        if hasattr(self.pipe, "enable_attention_slicing"):
-            self.pipe.enable_attention_slicing()
+        self._place_on_device(offload_mode)
         self.loaded_path = model_path
         self.logger.info("SD3 pipeline loaded: %s", model_path.name)
 

@@ -28,6 +28,8 @@ class ImagePipelineManager:
         self.budget = budget
         self._adapter: ImageModelAdapter | None = None
         self._current_arch: str | None = None
+        self.strategy = None
+        self.reduced_settings: dict | None = None
 
     def supported_architectures(self) -> list[str]:
         return list(self._ADAPTERS.keys())
@@ -90,23 +92,70 @@ class ImagePipelineManager:
         except Exception:
             return True, policy_message or "VRAM 확인 불가 — 계속 진행"
 
-    def load(self, model_path: Path, architecture: str) -> None:
-        """Adapter 선택 후 모델 로드 + OOM 사전 검증."""
+    def plan_strategy(
+        self,
+        architecture: str,
+        width: int = 1024,
+        height: int = 1024,
+        steps: int = 30,
+    ):
+        """메모리 전략을 결정한다 (v0.1 §8.2).
+
+        VRAM에 다 안 들어오면 시스템 RAM으로 넘기는 전략을 자동 선택한다.
+        """
+        from ..memory.strategy import decide_strategy
+
+        required = self.estimate_memory(architecture)
+        budget = self.budget.limit_gb if self.budget else None
+        detected = self.hardware.vram_gb
+        return decide_strategy(
+            required_vram_gb=required,
+            vram_budget_gb=budget,
+            vram_detected_gb=detected,
+            width=width,
+            height=height,
+            steps=steps,
+        )
+
+    def load(self, model_path: Path, architecture: str, strategy=None) -> None:
+        """Adapter 선택 후 모델 로드 + OOM 사전 검증.
+
+        Args:
+            strategy: MemoryStrategy. None이면 자동 결정.
+        """
         if not self.can_handle(architecture):
             raise RuntimeError(
                 f"지원하지 않는 아키텍처: {architecture}. "
                 f"지원: {self.supported_architectures()}"
             )
 
+        if strategy is None:
+            strategy = self.plan_strategy(architecture)
+        self.strategy = strategy
+
+        if strategy.tier.value == "impossible":
+            raise RuntimeError(f"메모리 부족: {strategy.reason}")
+
         ok, msg = self.check_vram(architecture)
         self.logger.info("VRAM check: %s", msg)
-        if not ok:
-            raise RuntimeError(f"OOM 위험: {msg}")
 
         adapter_cls = self._ADAPTERS[architecture]
         self._adapter = adapter_cls(self.hardware, self.logger)
         self._current_arch = architecture
-        self._adapter.load(model_path)
+
+        # RAM도 모자라면 전략이 제안한 낮은 설정을 사용한다
+        if strategy.suggested_width:
+            self.reduced_settings = {
+                "width": strategy.suggested_width,
+                "height": strategy.suggested_height,
+                "steps": strategy.suggested_steps,
+            }
+            self.logger.info("메모리 절약 설정 적용: %s", self.reduced_settings)
+        else:
+            self.reduced_settings = None
+
+        self._adapter.load(model_path, offload_mode=strategy.offload)
+        self.logger.info("메모리 전략: %s", strategy.describe())
 
     @property
     def adapter(self) -> ImageModelAdapter | None:
@@ -141,6 +190,8 @@ class ImagePipelineManager:
             self._adapter.unload()
         self._adapter = None
         self._current_arch = None
+        self.strategy = None
+        self.reduced_settings = None
         self.memory.cleanup()
 
     def supports_negative_prompt(self) -> bool:

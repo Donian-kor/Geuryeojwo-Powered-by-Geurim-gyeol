@@ -25,10 +25,71 @@ class ImageModelAdapter(ABC):
         self.logger = logger
         self.pipe = None
         self.loaded_path: Path | None = None
+        self.offload_mode = None
+        self._offload_applied = False
 
     @abstractmethod
-    def load(self, model_path: Path) -> None:
-        """모델을 메모리에 로드한다."""
+    def load(self, model_path: Path, offload_mode=None) -> None:
+        """모델을 메모리에 로드한다.
+
+        Args:
+            model_path: 모델 파일 또는 디렉토리
+            offload_mode: OffloadMode. None 또는 NONE이면 VRAM 전체 사용.
+        """
+
+    def _place_on_device(self, offload_mode=None) -> str:
+        """파이프라인을 메모리에 배치하고 적용된 방식을 문자열로 반환한다.
+
+        offload를 쓸 때는 `.to(device)`를 호출하면 안 된다.
+        두 가지를 같이 쓰면 diffusers가 오류를 낸다 (v0.1 §8.2).
+        """
+        from ..memory.strategy import OffloadMode
+
+        device = self.hardware.device
+        mode = offload_mode or OffloadMode.NONE
+        self.offload_mode = mode
+
+        if mode == OffloadMode.NONE:
+            self.pipe = self.pipe.to(device)
+            self._enable_attention_slicing()
+            self._offload_applied = False
+            return "vram_full"
+
+        # offload 계열은 .to(device)를 호출하면 안 된다
+        method = {
+            OffloadMode.MODEL_CPU: "enable_model_cpu_offload",
+            OffloadMode.GROUP: "enable_group_offload",
+            OffloadMode.SEQUENTIAL: "enable_sequential_cpu_offload",
+        }.get(mode)
+
+        if not method or not hasattr(self.pipe, method):
+            # 지원하지 않으면 VRAM 전체 로드로 되돌린다
+            self.logger.warning(
+                "%s 미지원 — VRAM 전체 로드로 대체합니다", mode.value
+            )
+            self.pipe = self.pipe.to(device)
+            self._enable_attention_slicing()
+            self.offload_mode = OffloadMode.NONE
+            self._offload_applied = False
+            return "vram_full_fallback"
+
+        try:
+            getattr(self.pipe, method)()
+            self._offload_applied = True
+            self.logger.info("메모리 절약: %s 적용 (%s)", mode.value, self.pipe.__class__.__name__)
+            return mode.value
+        except Exception as exc:
+            self.logger.warning("%s 적용 실패 (%s) — VRAM 전체 로드", mode.value, exc)
+            self.pipe = self.pipe.to(device)
+            self._enable_attention_slicing()
+            self.offload_mode = OffloadMode.NONE
+            self._offload_applied = False
+            return "vram_full_fallback"
+
+    def _enable_attention_slicing(self) -> None:
+        """Attention slicing을 켠다 (VRAM 절감)."""
+        if hasattr(self.pipe, "enable_attention_slicing"):
+            self.pipe.enable_attention_slicing()
 
     def generate(
         self,
@@ -77,8 +138,19 @@ class ImageModelAdapter(ABC):
 
     def unload(self) -> None:
         """모델을 언로드하고 메모리를 정리한다."""
+        if self.pipe is not None and self._offload_applied:
+            # offload 훅을 제거해야 가중치가 RAM에서 해제된다
+            for method in ("disable_model_cpu_offload", "disable_group_offload"):
+                if hasattr(self.pipe, method):
+                    try:
+                        getattr(self.pipe, method)()
+                    except Exception:
+                        pass
+                    break
         self.pipe = None
         self.loaded_path = None
+        self.offload_mode = None
+        self._offload_applied = False
 
     def estimate_memory(self) -> float:
         """예상 VRAM 사용량 (GB). 서브클래스에서 오버라이드 가능."""

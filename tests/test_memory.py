@@ -171,18 +171,28 @@ def test_engine_default_budget_is_eight_gb(project_root, tmp_path):
         isolated.shutdown()
 
 
-def test_pipeline_respects_budget(engine):
+def test_pipeline_respects_budget(restore_vram_budget):
     """파이프라인 VRAM 검사가 예산을 반영한다 (v0.1 §8.4)."""
+    engine = restore_vram_budget
     engine.set_vram_limit("default", 8.0)
     ok, message = engine.image.check_vram("flux")
     assert ok is False
     assert "9.0" in message
 
 
-def test_set_vram_limit_persists(engine, tmp_path):
+def test_set_vram_limit_persists(restore_vram_budget):
     """변경한 제한이 설정 파일에 저장된다 (v0.1 §3.4)."""
+    engine = restore_vram_budget
     engine.set_vram_limit("custom", 24.0)
     assert engine.vram_budget.limit_gb == 24.0
+
+
+def test_set_vram_limit_restores_default(restore_vram_budget):
+    """원래 모드로 되돌릴 수 있다."""
+    engine = restore_vram_budget
+    engine.set_vram_limit("default", 8.0)
+    assert engine.vram_budget.mode == "default"
+    assert engine.vram_budget.limit_gb == 8.0
 
 
 def test_cleanup_is_idempotent():

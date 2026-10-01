@@ -87,6 +87,33 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 }
 ```
 
+### 메모리 전략 — VRAM 부족 시 시스템 RAM 사용 (v0.1 §8.2)
+
+ComfyUI의 `SHARED` VRAMState처럼, VRAM이 부족하면 **시스템 RAM으로 넘겨서
+대신 실행**합니다. 사용자가 선택할 필요 없이 자동으로 결정됩니다.
+
+| 단계 | 조건 | 동작 | 속도 |
+|---|---|---|---|
+| `full` | VRAM 예산에 들어감 | 모델 전체를 VRAM에 | 최고 |
+| `offload` | VRAM 초과, RAM 여유 | 가중치를 RAM에 두고 필요 시 VRAM으로 | 20~30% 느림 |
+| `reduced` | VRAM·RAM 모두 부족 | 해상도 75% + offload | 그보다 느림 |
+| `impossible` | 둘 다 부족 | 실행 불가 + 안내 | — |
+
+offload 방식은 세 가지를 지원하며 기본은 `model_cpu_offload`입니다.
+
+- `model_cpu` (기본) — 컴포넌트 단위 오프로드. 안정적
+- `group` — diffusers 0.35+ 그룹 오프로드. 가장 빠르고 효율적
+- `sequential` — 레이어 단위. 가장 강하게 절약하지만 매우 느림
+
+> offload를 쓸 때는 `.to(device)`를 호출하지 않습니다. 둘을 같이 쓰면
+> diffusers가 오류를 냅니다. 코드가 이 제약을 자동으로 처리합니다.
+
+GUI에서 눈으로 확인할 수 있습니다.
+
+- 하단 상태바: `RAM: 15.4/31.1GB (50%)` · `VRAM: 2.1/7.9GB (27%)` 실시간 표시
+- Model Information 패널: `System RAM` / `VRAM Budget` / `Memory Strategy`
+- Dry Run: 사용할 전략과 적용될 해상도를 미리 안내
+
 ### 폴백 동작 (v0.1 §7)
 
 | 환경 | device | 정밀도 | 비고 |

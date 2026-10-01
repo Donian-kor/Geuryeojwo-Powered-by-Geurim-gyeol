@@ -37,6 +37,19 @@ def engine(project_root, tmp_path_factory):
 
 
 @pytest.fixture
+def restore_vram_budget(engine):
+    """VRAM 예산을 테스트 후 원래대로 복원한다.
+
+    엔진은 세션 스코드로 공유되므로, 예산을 바꾸는 테스트가
+    다른 테스트에 영향을 주지 않도록 한다.
+    """
+    original_mode = engine.vram_budget.mode
+    original_gb = engine.vram_budget.custom_gb
+    yield engine
+    engine.vram_budget.set_mode(original_mode, original_gb)
+
+
+@pytest.fixture
 def tmp_outputs(tmp_path):
     """출력/세션 임시 디렉토리."""
     outputs = tmp_path / "outputs"

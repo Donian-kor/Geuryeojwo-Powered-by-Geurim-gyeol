@@ -33,6 +33,9 @@ class DryRunResult:
     uses_negative_prompt: bool = True
     negative_prompt_available: bool = True
     vram_budget: str = ""
+    memory_strategy: str = ""
+    offload_mode: str = "none"
+    suggested_resolution: str = ""
 
     ready: bool = False
     warnings: list[str] = field(default_factory=list)
@@ -236,12 +239,25 @@ class DryRunMode:
             result.estimated_image_memory_gb or 0
         )
 
+        # 메모리 전략 (v0.1 §8.2)
+        strategy = self.engine.image.plan_strategy(
+            result.architecture, width, height, steps
+        )
+        result.memory_strategy = strategy.describe()
+        result.offload_mode = strategy.offload.value
+        if strategy.suggested_width:
+            result.suggested_resolution = (
+                f"{strategy.suggested_width}x{strategy.suggested_height}"
+            )
+
         # VRAM 검증 (예산 정책 + 실제 사용 가능량)
         budget = self.engine.vram_budget
         result.vram_budget = budget.describe()
 
         ok, message = budget.can_fit(total_est)
-        if not ok:
+        uses_offload = strategy.uses_offload
+
+        if not ok and not uses_offload:
             if result.total_vram_gb and total_est > result.total_vram_gb:
                 result.errors.append(
                     f"예상 VRAM 사용량 ({total_est:.1f} GB)이 "
@@ -249,11 +265,22 @@ class DryRunMode:
                 )
             else:
                 result.errors.append(f"VRAM 예산 초과 — {message}")
-        elif result.available_vram_gb and total_est > result.available_vram_gb:
-            result.warnings.append(
-                f"VRAM 여유 부족: 예상 {total_est:.1f} GB, "
-                f"사용 가능 {result.available_vram_gb:.1f} GB"
-            )
+        elif strategy.tier.value == "impossible":
+            result.errors.append(f"메모리 부족 — {strategy.reason}")
+        else:
+            if not ok:
+                result.warnings.append(
+                    f"VRAM 예산 초과 — 시스템 RAM을 사용해 실행합니다 ({strategy.speed_hint})"
+                )
+            elif result.available_vram_gb and total_est > result.available_vram_gb:
+                result.warnings.append(
+                    f"VRAM 여유 부족: 예상 {total_est:.1f} GB, "
+                    f"사용 가능 {result.available_vram_gb:.1f} GB"
+                )
+            if strategy.suggested_resolution:
+                result.warnings.append(
+                    f"메모리 절약 설정이 적용됩니다: {result.suggested_resolution}"
+                )
 
         # 파라미터 검증
         if width * height > 2048 * 2048:

@@ -224,9 +224,29 @@ class GenerationController:
             self._check_cancelled()
             self._emit(progress, TaskState.LOADING_IMAGE_MODEL, "이미지 모델 로드")
 
-            self.engine.image.load(req.image_path, image_profile.architecture)
+            # 메모리 전략 자동 결정 (v0.1 §8.2)
+            strategy = self.engine.image.plan_strategy(
+                image_profile.architecture, req.width, req.height, req.steps
+            )
+            if strategy.tier.value == "impossible":
+                raise RuntimeError(f"메모리 부족: {strategy.reason}")
+            if strategy.uses_offload or strategy.suggested_width:
+                self._emit(progress, TaskState.LOADING_IMAGE_MODEL, strategy.describe())
+                self.logger.info("메모리 전략: %s", strategy.describe())
+
+            self.engine.image.load(
+                req.image_path, image_profile.architecture, strategy
+            )
             self._log("model_load", name=req.image_path.name, model_type="image")
             self._snapshot_log(self.memory.take_snapshot("image_loaded"))
+
+            # 전략이 제안한 해상도/steps를 적용한다
+            width, height, steps = req.width, req.height, req.steps
+            reduced = self.engine.image.reduced_settings
+            if reduced:
+                width = reduced["width"]
+                height = reduced["height"]
+                steps = reduced["steps"]
 
             self._emit(progress, TaskState.ENCODING, "프롬프트 인코딩")
 
@@ -240,8 +260,8 @@ class GenerationController:
 
             self.task_runner.transition(TaskState.SAMPLING, "이미지 생성")
             image, seed = self.engine.image.generate(
-                positive, negative, req.width, req.height,
-                req.steps, req.cfg, req.seed, sampling_progress,
+                positive, negative, width, height,
+                steps, req.cfg, req.seed, sampling_progress,
             )
 
             self._emit(progress, TaskState.DECODING, "VAE 디코딩")
@@ -254,9 +274,9 @@ class GenerationController:
                 model=str(req.image_path),
                 prompt=positive,
                 negative_prompt=negative,
-                width=req.width,
-                height=req.height,
-                steps=req.steps,
+                width=width,
+                height=height,
+                steps=steps,
                 cfg=req.cfg,
                 sampler=getattr(image_profile, 'sampler', "euler_a"),
                 scheduler=getattr(image_profile, 'scheduler', "default"),
@@ -273,9 +293,9 @@ class GenerationController:
                 llm_model=str(req.llm_path) if req.llm_path else None,
                 image_model=str(req.image_path),
                 seed=seed,
-                width=req.width,
-                height=req.height,
-                steps=req.steps,
+                width=width,
+                height=height,
+                steps=steps,
                 cfg=req.cfg,
                 sampler=getattr(image_profile, 'sampler', "euler_a"),
                 scheduler=getattr(image_profile, 'scheduler', "default"),

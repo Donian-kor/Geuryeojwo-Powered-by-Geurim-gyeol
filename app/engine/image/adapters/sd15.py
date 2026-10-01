@@ -10,7 +10,7 @@ class SD15Adapter(ImageModelAdapter):
     architecture = "sd15"
     supports_negative_prompt = True
 
-    def load(self, model_path: Path) -> None:
+    def load(self, model_path: Path, offload_mode=None) -> None:
         try:
             import torch
             from diffusers import StableDiffusionPipeline
@@ -20,15 +20,12 @@ class SD15Adapter(ImageModelAdapter):
             ) from e
 
         dtype = self._dtype()
-        device = self.hardware.device
         self.pipe = StableDiffusionPipeline.from_single_file(
             str(model_path),
             torch_dtype=dtype,
             local_files_only=True,
         )
-        self.pipe = self.pipe.to(device)
-        if hasattr(self.pipe, "enable_attention_slicing"):
-            self.pipe.enable_attention_slicing()
+        self._place_on_device(offload_mode)
         self.loaded_path = model_path
         self.logger.info("SD15 pipeline loaded: %s", model_path.name)
 

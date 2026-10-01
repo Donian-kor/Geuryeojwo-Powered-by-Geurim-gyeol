@@ -84,6 +84,8 @@ class ModelInfoPanel(QGroupBox):
         self.est_vram_label = QLabel("-")
         self.avail_vram_label = QLabel("-")
         self.budget_label = QLabel(self.engine.vram_budget.describe())
+        self.ram_label = QLabel("-")
+        self.strategy_label = QLabel("-")
         self.device_label = QLabel("-")
         self.status_label = QLabel("-")
 
@@ -93,13 +95,23 @@ class ModelInfoPanel(QGroupBox):
         layout.addRow("Negative Prompt:", self.negative_label)
         layout.addRow("Estimated VRAM:", self.est_vram_label)
         layout.addRow("Available VRAM:", self.avail_vram_label)
+        layout.addRow("System RAM:", self.ram_label)
         layout.addRow("VRAM Budget:", self.budget_label)
+        layout.addRow("Memory Strategy:", self.strategy_label)
         layout.addRow("Device:", self.device_label)
         layout.addRow("Status:", self.status_label)
 
     def refresh(self, model_path: str | None = None) -> None:
-        """모델 정보를 갱신한다. model_path가 없으면 현재 VRAM만 갱신한다."""
+        """모델 정보를 갱신한다. model_path가 없으면 현재 메모리만 갱신한다."""
         snap = self.engine.memory.take_snapshot("model_info")
+
+        # 시스템 RAM (실측)
+        if snap.ram_free_gb is not None and snap.ram_total_gb is not None:
+            self.ram_label.setText(
+                f"{snap.ram_free_gb:.1f} GB 사용 가능 / {snap.ram_total_gb:.1f} GB"
+            )
+        else:
+            self.ram_label.setText("N/A")
 
         if model_path is None:
             self.avail_vram_label.setText(self._vram_text(snap))
@@ -108,6 +120,13 @@ class ModelInfoPanel(QGroupBox):
         path = Path(model_path)
         profile = self.engine.registry.profile_for(path)
         supported = self.engine.image.can_handle(profile.architecture)
+
+        # 메모리 전략 미리보기
+        strategy = self.engine.image.plan_strategy(profile.architecture)
+        self.strategy_label.setText(strategy.describe())
+        self.strategy_label.setStyleSheet(
+            "color:#6bcf7f;" if strategy.tier.value == "full" else "color:#ffd93d;"
+        )
 
         self.model_label.setText(path.name)
         self.arch_label.setText(profile.architecture)
@@ -128,13 +147,15 @@ class ModelInfoPanel(QGroupBox):
             self.status_label.setText("⚠ Unsupported architecture")
             return
 
-        fits, _ = budget.can_fit(estimated)
-        if not fits:
-            self.status_label.setText("⚠ VRAM 예산 초과 — 설정 변경 필요")
-        elif snap.vram_free_gb is not None and estimated and estimated + 0.5 > snap.vram_free_gb:
-            self.status_label.setText("⚠ VRAM 부족 — 설정 하향 권장")
+        if strategy.tier.value == "impossible":
+            self.status_label.setText("❌ 메모리 부족 — 더 작은 모델 필요")
+        elif strategy.tier.value == "full":
+            if snap.vram_free_gb is not None and estimated and estimated + 0.5 > snap.vram_free_gb:
+                self.status_label.setText("⚠ VRAM 부족 — 설정 하향 권장")
+            else:
+                self.status_label.setText("✅ Ready")
         else:
-            self.status_label.setText("✅ Ready")
+            self.status_label.setText(f"✅ Ready ({strategy.speed_hint})")
 
     def _vram_text(self, snap) -> str:
         if snap.vram_free_gb is None or snap.vram_total_gb is None:
@@ -190,6 +211,8 @@ class MainWindow(QWidget):
         self.status_vram=QLabel("VRAM: -"); status_bar.addWidget(self.status_vram)
         self.status_cpu=QLabel("CPU: -"); status_bar.addWidget(self.status_cpu)
         self.status_gpu=QLabel("GPU: -"); status_bar.addWidget(self.status_gpu)
+        self.status_strategy=QLabel("메모리: -"); self.status_strategy.setStyleSheet("color:#7fb3ff;")
+        status_bar.addWidget(self.status_strategy)
         status_bar.addStretch()
         self.status_msg=QLabel("준비됨"); status_bar.addWidget(self.status_msg)
         root.addLayout(status_bar)
@@ -315,7 +338,13 @@ class MainWindow(QWidget):
             if result.errors:
                 msg += "오류:\n" + "\n".join(result.errors) + "\n\n"
             msg += f"VRAM 예산: {result.vram_budget}\n" if result.vram_budget else ""
+            if result.memory_strategy:
+                msg += f"메모리 전략: {result.memory_strategy}\n"
+            if result.suggested_resolution:
+                msg += f"적용 해상도: {result.suggested_resolution}\n"
             msg += f"VRAM: {result.available_vram_gb}GB 사용 가능 / {result.total_vram_gb}GB 전체\n"
+            if result.available_ram_gb is not None:
+                msg += f"RAM: {result.available_ram_gb}GB 사용 가능 / {result.total_ram_gb}GB 전체\n"
             msg += f"예상 이미지 메모리: {result.estimated_image_memory_gb}GB"
             QMessageBox.information(self, "환경 검사 결과", msg)
         except Exception as e:
@@ -336,6 +365,8 @@ class MainWindow(QWidget):
                 used = (snap.vram_total_gb - snap.vram_free_gb)
                 pct = (used / snap.vram_total_gb * 100) if snap.vram_total_gb > 0 else 0
                 self.status_vram.setText(f"VRAM: {used:.1f}/{snap.vram_total_gb:.1f}GB ({pct:.0f}%)")
+            else:
+                self.status_vram.setText("VRAM: 없음 (CPU 모드)")
             if snap.vram_allocated_gb is not None:
                 self.status_gpu.setText(f"GPU alloc: {snap.vram_allocated_gb:.1f}GB")
             self.model_info.avail_vram_label.setText(
