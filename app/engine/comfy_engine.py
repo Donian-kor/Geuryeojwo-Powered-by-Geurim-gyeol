@@ -259,7 +259,12 @@ class GeurimGyeolEngine:
         """
         started = time.perf_counter()
 
-        if not self.online and not self.refresh_status().online:
+        # 오프라인이면 실행하지 않는다.
+        # refresh_status() 는 예외를 삼키고 online=False 를 담은 상태를
+        # 남기므로, 여기서는 오직 온라인 여부만 확인한다.
+        if not self.online:
+            self.refresh_status()
+        if not self.online:
             return GenerationResult(
                 success=False,
                 error=(

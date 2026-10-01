@@ -6,8 +6,7 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit,
     QComboBox, QSpinBox, QDoubleSpinBox, QPushButton, QProgressBar,
-    QMessageBox, QFormLayout, QGroupBox, QTabWidget, QDialog, QSizePolicy,
-    QGridLayout,
+    QMessageBox, QGroupBox, QTabWidget, QSizePolicy, QGridLayout,
 )
 from app.engine.comfy_engine import GeurimGyeolEngine
 from app.gui.output_browser import OutputBrowser
@@ -30,37 +29,6 @@ class Worker(QThread):
             else:
                 self.failed.emit(result.error or "생성 실패", None)
         except Exception as e: self.failed.emit(str(e), None)
-
-
-class RecoveryDialog(QDialog):
-    """에러 복구 제안을 사용자에게 제시하고 적용 여부를 묻는다 (v0.1 §29)."""
-
-    APPLY = 1
-    DISCARD = 0
-
-    def __init__(self, error: str, suggestion, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("생성 실패 - 복구 제안")
-        self.setMinimumWidth(420)
-        self.suggestion = suggestion
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(f"<b>오류:</b> {error}"))
-        layout.addWidget(QLabel(
-            "<br>".join(f"{k}: {v}" for k, v in (suggestion.changes or {}).items())
-        ))
-        if suggestion.estimated_vram_save:
-            layout.addWidget(QLabel(f"예상 VRAM 절약: {suggestion.estimated_vram_save:.1f} GB"))
-
-        layout.addWidget(QLabel("제언된 설정을 적용한 뒤 다시 생성하시겠습니까?"))
-        buttons = QHBoxLayout()
-        self.apply_btn = QPushButton("설정 적용")
-        self.discard_btn = QPushButton("그대로 닫기")
-        buttons.addWidget(self.apply_btn)
-        buttons.addWidget(self.discard_btn)
-        layout.addLayout(buttons)
-        self.apply_btn.clicked.connect(lambda: self.done(self.APPLY))
-        self.discard_btn.clicked.connect(lambda: self.done(self.DISCARD))
 
 
 class ModelInfoPanel(QGroupBox):

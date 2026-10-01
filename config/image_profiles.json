@@ -1,7 +1,0 @@
-{
-  "sd15": {"kind":"image", "architecture":"sd15", "prompt_style":"tag", "use_negative":true, "loader":"stable_diffusion_single_file", "estimated_vram":2.5, "default_steps":25, "default_resolution":[512,512], "sampler":"dpmpp_2m", "scheduler":"karras"},
-  "sd21": {"kind":"image", "architecture":"sd21", "prompt_style":"tag", "use_negative":true, "loader":"stable_diffusion_single_file", "estimated_vram":3.0, "default_steps":25, "default_resolution":[768,768], "sampler":"dpmpp_2m", "scheduler":"karras"},
-  "sdxl": {"kind":"image", "architecture":"sdxl", "prompt_style":"sentence", "use_negative":true, "loader":"stable_diffusion_xl_single_file", "estimated_vram":7.1, "default_steps":30, "default_resolution":[1024,1024], "sampler":"euler_a", "scheduler":"default"},
-  "sd3":  {"kind":"image", "architecture":"sd3",  "prompt_style":"sentence", "use_negative":false, "loader":"diffusers_directory", "estimated_vram":9.5, "default_steps":30, "default_resolution":[1024,1024], "sampler":"euler", "scheduler":"flow_match_euler"},
-  "flux": {"kind":"image", "architecture":"flux", "prompt_style":"sentence", "use_negative":false, "loader":"diffusers_directory", "estimated_vram":9.0, "default_steps":20, "default_resolution":[1024,1024], "sampler":"euler", "scheduler":"flow_match_euler"}
-}
