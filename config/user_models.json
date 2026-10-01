@@ -1,0 +1,16 @@
+{
+  "_comment": "사용자 Override (v0.1 §3.5, §11 1순위). 파일명을 키로 아키텍처를 강제 지정한다. 실행 후 자동 판별이 틀릴 때 사용한다.",
+  "_example_sd15_filename": {
+    "kind": "image",
+    "architecture": "sd15",
+    "prompt_style": "tag",
+    "use_negative": true,
+    "loader": "stable_diffusion_single_file",
+    "estimated_vram": 2.5,
+    "default_steps": 25,
+    "default_resolution": [512, 512],
+    "sampler": "dpmpp_2m",
+    "scheduler": "karras",
+    "source": "override"
+  }
+}

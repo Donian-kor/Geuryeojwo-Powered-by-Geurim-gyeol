@@ -4,3 +4,16 @@
   "paths": {"llm":"models/llm","checkpoints":"models/checkpoints","vae":"models/vae","lora":"models/lora","outputs":"outputs"},
   "memory": {"sequential_model_loading":true,"empty_cuda_cache":true}
 }
+    "kind": "image",
+    "architecture": "sdxl",
+    "prompt_style": "sentence",
+    "use_negative": true,
+    "loader": "stable_diffusion_xl_single_file",
+    "estimated_vram": 7.1,
+    "default_steps": 30,
+    "default_resolution": [1024, 1024],
+    "sampler": "euler_a",
+    "scheduler": "default",
+    "source": "override"
+  }
+}

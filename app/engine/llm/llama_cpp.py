@@ -1,5 +1,6 @@
 from __future__ import annotations
 from pathlib import Path
+from typing import Any
 
 from .base import BaseLLM
 
@@ -11,10 +12,11 @@ class LocalLLM(BaseLLM):
     프로세스 내에서 직접 모델을 로드하고 생성한다.
     """
 
-    def __init__(self, model_path: Path, device: str, logger=None):
+    def __init__(self, model_path: Path, device: str, logger=None, profile: dict | None = None):
         self.model_path = model_path
         self.device = device
         self.logger = logger
+        self.profile: dict[str, Any] = profile or {}
         self.model = None
 
     def load(self):
@@ -27,7 +29,7 @@ class LocalLLM(BaseLLM):
         n_gpu_layers = -1 if self.device == "cuda" else 0
         self.model = Llama(
             model_path=str(self.model_path),
-            n_ctx=4096,
+            n_ctx=self.profile.get("max_context", 4096),
             n_gpu_layers=n_gpu_layers,
             verbose=False,
         )

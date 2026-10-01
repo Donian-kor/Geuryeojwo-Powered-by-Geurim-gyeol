@@ -30,20 +30,26 @@ class GeurimGyeolEngine:
         self.hardware = detect_hardware()
         self.memory = MemoryManager(self.logs.memory)
         self.registry = ModelRegistry(
-            root / "models", root / "config" / "image_profiles.json"
+            root / "models",
+            root / "config" / "image_profiles.json",
+            root / "config" / "user_models.json",
         )
         self.prompt = PromptEngine(
             root / "config" / "prompt_profiles.json",
             root / "config" / "negative_dictionary.json",
             self.logger,
+            root / "config" / "llm_profiles.json",
         )
         self.image = ImagePipelineManager(self.hardware, self.memory, self.logger)
-        self.generation = GenerationController(
-            self, self.registry, self.prompt, self.memory, self.logger,
-            root / "outputs"
-        )
         self.task_runner = TaskRunner(self.logger)
         self.error_handler = ErrorHandler(self.logs.error)
+        self.generation = GenerationController(
+            self, self.registry, self.prompt, self.memory, self.logger,
+            root / "outputs",
+            task_runner=self.task_runner,
+            error_handler=self.error_handler,
+            logs=self.logs,
+        )
         self.dry_runner = DryRunMode(self, self.logs.application)
         self.model_validator = ModelValidator(self.logger)
         self._initialized = False
@@ -65,6 +71,66 @@ class GeurimGyeolEngine:
             "Image": [str(p) for p in image_models],
         })
         return llm_models, image_models
+
+    def analyze_hardware(self) -> "HardwareInfo":
+        """하드웨어 분석 결과를 반환한다 (v0.1 §7, §44.8)."""
+        return self.hardware
+
+    def resolve_model_profile(self, image_model):
+        """이미지 모델 프로필을 결정한다 (v0.1 §11, §44.8)."""
+        return self.registry.profile_for(Path(image_model))
+
+    def enhance_prompt(self, user_input: str, architecture: str = "sdxl", llm_path=None):
+        """LLM으로 프롬프트를 확장한다 (v0.1 §13, §44.8).
+
+        LLM을 명시적으로 해제하므로 호출자가 메모리를 정리해야 한다.
+        """
+        from .llm.llama_cpp import LocalLLM
+
+        llm = None
+        try:
+            if llm_path:
+                llm = LocalLLM(
+                    Path(llm_path),
+                    self.hardware.device,
+                    self.logger,
+                    profile=self.prompt.llm_profile_for(llm_path),
+                ).load()
+            result = self.prompt.build(user_input, architecture, llm, llm_path)
+            return result.positive, result.negative
+        finally:
+            if llm:
+                llm.unload()
+                del llm
+            self.memory.cleanup()
+
+    def unload_llm(self) -> None:
+        """LLM 완전 해제 후 메모리를 정리한다 (v0.1 §8.1)."""
+        self.memory.cleanup()
+        snap = self.memory.take_snapshot("after_llm_unload")
+        self.logger.info("LLM unloaded — VRAM free=%s", snap.vram_free_gb)
+
+    def cleanup_memory(self) -> None:
+        """메모리 정리 (§8)."""
+        self.memory.cleanup()
+
+    def load_image_model(self, image_model, architecture: str | None = None) -> None:
+        """이미지 모델을 로드한다 (v0.1 §44.8)."""
+        path = Path(image_model)
+        arch = architecture or self.registry.profile_for(path).architecture
+        self.image.load(path, arch)
+
+    def generate_image(self, prompt: str, profile, width=1024, height=1024, steps=30, cfg=7.0, seed=-1):
+        """이미지를 생성하고 결과를 반환한다 (v0.1 §44.8)."""
+        negative = self.prompt.negative(profile.architecture)
+        image, used_seed = self.image.generate(
+            prompt, negative, width, height, steps, cfg, seed
+        )
+        return {"image": image, "seed": used_seed, "model": profile.architecture}
+
+    def unload_image_model(self) -> None:
+        """이미지 모델을 해제한다 (v0.1 §44.8)."""
+        self.image.unload()
 
     def shutdown(self) -> None:
         """ENGINE SHUTDOWN — unload any loaded models."""

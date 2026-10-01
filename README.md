@@ -47,3 +47,26 @@ No external AI server should be running or configured.
 ## Output
 
 Images are written to `outputs/YYYY-MM-DD/` with a matching JSON metadata file containing prompt, seed, model, dimensions, steps, CFG, engine version, and elapsed time.
+
+Sessions are written to `sessions/YYYY-MM-DD/HHmmss-N/` and contain `session.json` plus a copy of each generated image and its metadata.
+
+## Configuration
+
+| File | Purpose |
+|---|---|
+| `config/image_profiles.json` | Per-architecture model profiles (VRAM estimate, steps, sampler) |
+| `config/prompt_profiles.json` | Per-architecture prompt style (tag/sentence) and negative policy |
+| `config/negative_dictionary.json` | Negative prompt tag dictionary |
+| `config/llm_profiles.json` | LLM capability profile (context, temperature, multilingual) |
+| `config/user_models.json` | User Override — force an architecture for a specific filename |
+| `config/app_config.json` | Application settings |
+
+Architecture detection priority: user override → explicit config → registry → filename heuristic → default.
+
+## Test
+
+```bash
+pytest
+```
+
+The suite covers hardware detection, memory lifecycle, prompt policy, model registry and override, task state machine, error/OOM recovery, session/output persistence, and adapter contracts.

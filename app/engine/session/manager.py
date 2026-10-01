@@ -139,15 +139,44 @@ class SessionManager:
         metadata: SessionMetadata,
         image_path: Path,
         image_number: int,
-    ) -> None:
-        """세션에 이미지 생성 결과를 추가한다."""
+    ) -> list[Path]:
+        """세션에 이미지 생성 결과를 추가한다 (v0.1 §21).
+
+        이미지와 메타데이터 JSON을 세션 디렉토리로 복사하고,
+        복사된 파일 경로 리스트를 반환한다.
+
+        Returns:
+            list[Path]: (이미지 경로, JSON 경로) 리스트
+        """
+        import json as _json
+        import shutil
+
         meta_path = session_path / "session.json"
+
+        target_image = session_path / f"{image_number:03d}.png"
+        target_json = session_path / f"{image_number:03d}.json"
+
+        shutil.copy2(image_path, target_image)
+
+        source_json = image_path.with_suffix(".json")
+        if source_json.exists():
+            shutil.copy2(source_json, target_json)
+        else:
+            target_json.write_text(
+                _json.dumps(metadata.to_dict(), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
         metadata.images.append({
-            "filename": image_path.name,
+            "filename": target_image.name,
+            "metadata": target_json.name,
+            "source": str(image_path),
             "number": image_number,
+            "seed": metadata.seed,
             "created_at": datetime.now().isoformat(timespec="seconds"),
         })
         meta_path.write_text(
-            json.dumps(metadata.to_dict(), ensure_ascii=False, indent=2),
+            _json.dumps(metadata.to_dict(), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        return [target_image, target_json]

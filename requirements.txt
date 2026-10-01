@@ -6,5 +6,9 @@ accelerate>=0.28
 diffusers>=0.30
 safetensors>=0.4
 sentencepiece>=0.2
+# VRAM/RAM 모니터링용 시스템 정보 라이브러리 (v0.1 §8.3, §30)
+psutil>=5.9
 # GGUF local LLM runtime. On some platforms this may build from source.
 llama-cpp-python>=0.3
+# 테스트 runner (v0.1 §36)
+pytest>=8.0

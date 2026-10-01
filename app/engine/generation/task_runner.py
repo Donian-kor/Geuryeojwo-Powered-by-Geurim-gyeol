@@ -117,6 +117,14 @@ class TaskRunner:
         if self._progress_callback:
             self._progress_callback(self._progress, self._message)
 
+    def set_progress(self, progress: int, message: str = "") -> None:
+        """Sampling 단계처럼 연속 변하는 진행률을 직접 갱신한다 (v0.1 §20)."""
+        self._progress = max(0, min(100, int(progress)))
+        if message:
+            self._message = message
+        if self._progress_callback:
+            self._progress_callback(self._progress, self._message)
+
     def start(self) -> None:
         """작업 시작 - INITIALIZING 상태로 전환."""
         self._error = None

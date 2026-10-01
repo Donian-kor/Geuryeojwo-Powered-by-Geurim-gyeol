@@ -6,7 +6,7 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit,
     QComboBox, QSpinBox, QDoubleSpinBox, QPushButton, QProgressBar,
-    QMessageBox, QFormLayout, QGroupBox, QTabWidget,
+    QMessageBox, QFormLayout, QGroupBox, QTabWidget, QDialog,
 )
 from app.engine import GeurimGyeolEngine
 from app.engine.generation.controller import GenerationRequest, GenerationResult
@@ -19,13 +19,119 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class Worker(QThread):
-    progress = Signal(int, str); done = Signal(str, dict); failed = Signal(str)
+    progress = Signal(int, str); done = Signal(str, dict); failed = Signal(str, object)
     def __init__(self, controller, req): super().__init__(); self.controller=controller; self.req=req
     def run(self):
         try:
             result: GenerationResult = self.controller.run(self.req, lambda v,m: self.progress.emit(v,m))
-            self.done.emit(str(result.image_path), result.metadata)
-        except Exception as e: self.failed.emit(str(e))
+            if result.success:
+                self.done.emit(str(result.image_path), result.metadata)
+            else:
+                self.failed.emit(result.error or "생성 실패", result.suggestion)
+        except Exception as e: self.failed.emit(str(e), None)
+
+
+class RecoveryDialog(QDialog):
+    """에러 복구 제안을 사용자에게 제시하고 적용 여부를 묻는다 (v0.1 §29)."""
+
+    APPLY = 1
+    DISCARD = 0
+
+    def __init__(self, error: str, suggestion, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("생성 실패 - 복구 제안")
+        self.setMinimumWidth(420)
+        self.suggestion = suggestion
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"<b>오류:</b> {error}"))
+        layout.addWidget(QLabel(
+            "<br>".join(f"{k}: {v}" for k, v in (suggestion.changes or {}).items())
+        ))
+        if suggestion.estimated_vram_save:
+            layout.addWidget(QLabel(f"예상 VRAM 절약: {suggestion.estimated_vram_save:.1f} GB"))
+
+        layout.addWidget(QLabel("제언된 설정을 적용한 뒤 다시 생성하시겠습니까?"))
+        buttons = QHBoxLayout()
+        self.apply_btn = QPushButton("설정 적용")
+        self.discard_btn = QPushButton("그대로 닫기")
+        buttons.addWidget(self.apply_btn)
+        buttons.addWidget(self.discard_btn)
+        layout.addLayout(buttons)
+        self.apply_btn.clicked.connect(lambda: self.done(self.APPLY))
+        self.discard_btn.clicked.connect(lambda: self.done(self.DISCARD))
+
+
+class ModelInfoPanel(QGroupBox):
+    """선택된 이미지 모델의 상세 정보 표시 (v0.1 §26).
+
+    Model / Architecture / Prompt Style / Negative Prompt /
+    Estimated VRAM / Available VRAM / Device / Status 를 표시한다.
+    """
+
+    def __init__(self, engine, parent=None):
+        super().__init__("Model Information", parent)
+        self.engine = engine
+        self._build_ui()
+        self.refresh()
+
+    def _build_ui(self) -> None:
+        layout = QFormLayout(self)
+        self.model_label = QLabel("-")
+        self.arch_label = QLabel("-")
+        self.style_label = QLabel("-")
+        self.negative_label = QLabel("-")
+        self.est_vram_label = QLabel("-")
+        self.avail_vram_label = QLabel("-")
+        self.device_label = QLabel("-")
+        self.status_label = QLabel("-")
+
+        layout.addRow("Model:", self.model_label)
+        layout.addRow("Architecture:", self.arch_label)
+        layout.addRow("Prompt Style:", self.style_label)
+        layout.addRow("Negative Prompt:", self.negative_label)
+        layout.addRow("Estimated VRAM:", self.est_vram_label)
+        layout.addRow("Available VRAM:", self.avail_vram_label)
+        layout.addRow("Device:", self.device_label)
+        layout.addRow("Status:", self.status_label)
+
+    def refresh(self, model_path: str | None = None) -> None:
+        """모델 정보를 갱신한다. model_path가 없으면 현재 VRAM만 갱신한다."""
+        snap = self.engine.memory.take_snapshot("model_info")
+
+        if model_path is None:
+            self.avail_vram_label.setText(self._vram_text(snap))
+            return
+
+        path = Path(model_path)
+        profile = self.engine.registry.profile_for(path)
+        supported = self.engine.image.can_handle(profile.architecture)
+
+        self.model_label.setText(path.name)
+        self.arch_label.setText(profile.architecture)
+        self.style_label.setText(profile.prompt_style)
+        self.negative_label.setText(
+            "Supported" if profile.use_negative else "Not supported"
+        )
+        estimated = profile.estimated_vram or self.engine.image.estimate_memory(
+            profile.architecture
+        )
+        self.est_vram_label.setText(f"{estimated:.1f} GB" if estimated else "-")
+        self.avail_vram_label.setText(self._vram_text(snap))
+        self.device_label.setText(f"{self.engine.hardware.backend} ({self.engine.hardware.name})")
+
+        if not supported:
+            self.status_label.setText("⚠ Unsupported architecture")
+            return
+        if snap.vram_free_gb is not None and estimated and estimated + 0.5 > snap.vram_free_gb:
+            self.status_label.setText("⚠ VRAM 부족 — 설정 하향 권장")
+        else:
+            self.status_label.setText("✅ Ready")
+
+    def _vram_text(self, snap) -> str:
+        if snap.vram_free_gb is None or snap.vram_total_gb is None:
+            return "N/A (CPU mode)"
+        return f"{snap.vram_free_gb:.1f} GB / {snap.vram_total_gb:.1f} GB"
 
 
 class MainWindow(QWidget):
@@ -85,6 +191,8 @@ class MainWindow(QWidget):
         left=QVBoxLayout(); body.addLayout(left,1); right=QVBoxLayout(); body.addLayout(right,1)
         models=QGroupBox("Models"); form=QFormLayout(models)
         self.llm=QComboBox(); self.image=QComboBox(); form.addRow("Local LLM (GGUF)",self.llm); form.addRow("Image Model",self.image); left.addWidget(models)
+        self.model_info=ModelInfoPanel(self.engine); left.addWidget(self.model_info)
+        self.image.currentIndexChanged.connect(lambda _: self.model_info.refresh(self.image.currentData()))
         promptbox=QGroupBox("Prompt"); pl=QVBoxLayout(promptbox); self.prompt=QTextEdit(); self.prompt.setPlaceholderText("무엇을 그리고 싶나요?"); self.prompt.setMinimumHeight(150); pl.addWidget(self.prompt); left.addWidget(promptbox)
         params=QGroupBox("Generation"); pf=QFormLayout(params)
         self.w=QSpinBox(); self.w.setRange(64,4096); self.w.setValue(1024); self.w.setSingleStep(64)
@@ -160,6 +268,9 @@ class MainWindow(QWidget):
                 self.status_vram.setText(f"VRAM: {used:.1f}/{snap.vram_total_gb:.1f}GB ({pct:.0f}%)")
             if snap.vram_allocated_gb is not None:
                 self.status_gpu.setText(f"GPU alloc: {snap.vram_allocated_gb:.1f}GB")
+            self.model_info.avail_vram_label.setText(
+                self.model_info._vram_text(snap)
+            )
         except Exception:
             pass
 
@@ -207,6 +318,7 @@ class MainWindow(QWidget):
         if images:
             arch = "sdxl" if "sdxl" in images[0].name.lower() else ("flux" if "flux" in images[0].name.lower() else "sd15")
             self.prompt_preview.set_model(arch, self.llm.currentData() if self.llm.currentData() else None)
+        self.model_info.refresh(self.image.currentData())
 
     def start(self):
         if self.worker and self.worker.isRunning(): return
@@ -224,7 +336,22 @@ class MainWindow(QWidget):
         if hasattr(self, 'output_browser'): self.output_browser._refresh_list()
         if hasattr(self, 'session_browser'): self.session_browser._refresh_list()
 
-    def fail(self,msg): self.generate.setEnabled(True); self.status.setText("실패"); self.log.append("ERROR: "+msg); QMessageBox.critical(self,"생성 실패",msg)
+    def fail(self,msg,suggestion=None):
+        """실패 처리 — 복구 제안이 있으면 제시한다 (v0.1 §29)."""
+        self.generate.setEnabled(True); self.status.setText("실패"); self.log.append("ERROR: "+msg)
+        if suggestion is None:
+            QMessageBox.critical(self,"생성 실패",msg); return
+        dialog = RecoveryDialog(msg, suggestion, self)
+        dialog.exec()
+        if dialog.result() != RecoveryDialog.APPLY:
+            QMessageBox.warning(self,"생성 실패",msg); return
+        changes = suggestion.changes or {}
+        if "width" in changes: self.w.setValue(changes["width"])
+        if "height" in changes: self.h.setValue(changes["height"])
+        if "steps" in changes: self.steps.setValue(changes["steps"])
+        if "cfg" in changes: self.cfg.setValue(changes["cfg"])
+        self.status.setText("안전한 설정이 적용되었습니다. '그려줘'를 다시 눌러주세요.")
+        self.log.append(f"복구 설정 적용: {changes}")
 
     def closeEvent(self, event):
         self._mem_timer.stop()

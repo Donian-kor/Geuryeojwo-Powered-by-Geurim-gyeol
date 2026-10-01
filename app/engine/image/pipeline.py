@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Callable
 
 from .base import ImageModelAdapter, GenerationResult
-from .adapters import SD15Adapter, SDXLAdapter, FluxAdapter
+from .adapters import SD15Adapter, SDXLAdapter, SD3Adapter, FluxAdapter
 
 
 class ImagePipelineManager:
@@ -17,6 +17,7 @@ class ImagePipelineManager:
         "sd15": SD15Adapter,
         "sd21": SD15Adapter,
         "sdxl": SDXLAdapter,
+        "sd3": SD3Adapter,
         "flux": FluxAdapter,
     }
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Callable
 
 
 class ErrorType(Enum):
@@ -89,13 +90,30 @@ class ErrorHandler:
         self._logger = logger
         self._oom_recovery_class = oom_recovery_class
 
-    def handle(self, error: Exception, error_type: ErrorType = ErrorType.UNKNOWN, context: str = "") -> RecoverySuggestion | None:
-        """에러를 처리하고 필요시 복구 제안을 반환한다."""
+    def handle(
+        self,
+        error: Exception,
+        error_type: ErrorType = ErrorType.UNKNOWN,
+        context: str = "",
+        on_recovery: Callable[[], None] | None = None,
+    ) -> RecoverySuggestion | None:
+        """에러를 처리하고 필요시 복구 제안을 반환한다 (v0.1 §28, §29).
+
+        Args:
+            on_recovery: 복구 준비 콜백. OOM 시 모델 언로드 + GC +
+                CUDA 캐시 정리 + 스냅샷 기록을 수행한다 (§29 2~6단계).
+        """
         if self._logger:
             msg = f"[{error_type.value}] {context}: {error}" if context else f"[{error_type.value}] {error}"
             self._logger.error(msg, exc_info=True)
 
         if error_type == ErrorType.VRAM_INSUFFICIENT:
+            if on_recovery:
+                try:
+                    on_recovery()
+                except Exception as recovery_error:
+                    if self._logger:
+                        self._logger.error("Recovery failed: %s", recovery_error)
             return self._handle_oom(error, context)
         elif error_type == ErrorType.GGUF_LOAD_FAILED:
             return self._handle_gguf_error(error, context)

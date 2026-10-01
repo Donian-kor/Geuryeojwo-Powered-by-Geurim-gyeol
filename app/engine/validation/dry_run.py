@@ -175,16 +175,23 @@ class DryRunMode:
         return result
 
     def _detect_architecture(self, image_path: Path) -> str:
-        """이미지 모델 파일로부터 아키텍처 추정."""
+        """이미지 모델 파일로부터 아키텍처 추정 (v0.1 §11)."""
         name = image_path.name.lower()
-        if "flux" in name:
-            return "flux"
-        if "sdxl" in name or "sd_xl" in name:
-            return "sdxl"
-        if "sd21" in name or "sd_21" in name:
-            return "sd21"
-        if "sd15" in name or "sd_1.5" in name or "sd1" in name:
-            return "sd15"
+        for keyword, arch in (
+            ("flux", "flux"),
+            ("sd3", "sd3"),
+            ("stable-diffusion-3", "sd3"),
+            ("sdxl", "sdxl"),
+            ("sd_xl", "sdxl"),
+            ("xl_base", "sdxl"),
+            ("sd21", "sd21"),
+            ("sd_21", "sd21"),
+            ("sd15", "sd15"),
+            ("sd_15", "sd15"),
+            ("v1-5", "sd15"),
+        ):
+            if keyword in name:
+                return arch
         return "sdxl"
 
     def _estimate_llm_memory(self, llm_path: Path) -> float | None:
@@ -311,18 +318,24 @@ class ModelValidator:
 
     def _detect_architecture(self, path: Path) -> str:
         name = path.name.lower()
-        if "flux" in name:
-            return "flux"
-        if "sdxl" in name or "sd_xl" in name:
-            return "sdxl"
-        if "sd21" in name or "sd_21" in name:
-            return "sd21"
-        if "sd15" in name or "sd_1.5" in name or "sd1" in name:
-            return "sd15"
-        if "qwen" in name:
-            return "qwen"
-        if "llama" in name:
-            return "llama"
+        for keyword, arch in (
+            ("flux", "flux"),
+            ("sd3", "sd3"),
+            ("stable-diffusion-3", "sd3"),
+            ("sdxl", "sdxl"),
+            ("sd_xl", "sdxl"),
+            ("xl_base", "sdxl"),
+            ("sd21", "sd21"),
+            ("sd_21", "sd21"),
+            ("sd15", "sd15"),
+            ("sd_15", "sd15"),
+            ("v1-5", "sd15"),
+        ):
+            if keyword in name:
+                return arch
+        for keyword, arch in (("qwen", "qwen"), ("llama", "llama"), ("gemma", "gemma")):
+            if keyword in name:
+                return arch
         return "unknown"
 
     def _validate_gguf(self, path: Path, result: ModelValidationResult) -> None:

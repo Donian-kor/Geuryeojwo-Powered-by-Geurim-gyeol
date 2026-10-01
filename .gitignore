@@ -3,12 +3,12 @@ __pycache__/
 .venv/
 .env
 outputs/*
+sessions/*
 models/*
 !models/llm/.gitkeep
 !models/checkpoints/.gitkeep
 !models/vae/.gitkeep
 !models/lora/.gitkeep
 *.log
-_smoke_test.py
-_test_llm.py
-_test_models.py
+.pytest_cache/
+_out.txt
