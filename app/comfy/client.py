@@ -85,20 +85,38 @@ class ComfyClient:
         self.logger = logger
         self.client_id = str(uuid.uuid4())
         self._http: httpx.AsyncClient | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     def _ensure_http(self) -> httpx.AsyncClient:
-        """지연 생성 HTTP 클라이언트."""
-        if self._http is None or self._http.is_closed:
+        """지연 생성 HTTP 클라이언트.
+
+        이벤트 루프가 바뀌면 반드시 새 클라이언트를 만든다.
+        asyncio.run 은 호출마다 루프를 새로 만들고 닫으므로, 이전 루프에
+        묶인 클라이언트를 재사용하면 "Event loop is closed" 로 실패한다.
+        (GUI 엔진이 sync facade 로 asyncio.run 을 반복 호출할 때 발생)
+        """
+        try:
+            current = asyncio.get_running_loop()
+        except RuntimeError:
+            current = None
+
+        if (
+            self._http is None
+            or self._http.is_closed
+            or self._loop is not current
+        ):
             self._http = httpx.AsyncClient(
                 base_url=self.config.base_url,
                 timeout=self.config.connect_timeout_seconds,
             )
+            self._loop = current
         return self._http
 
     async def close(self) -> None:
         if self._http is not None and not self._http.is_closed:
             await self._http.aclose()
         self._http = None
+        self._loop = None
 
     async def _get(self, path: str, timeout: float | None = None):
         http = self._ensure_http()

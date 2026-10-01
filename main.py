@@ -1,4 +1,4 @@
-"""그려줘 v0.1 (Geuryeojwo) - standalone local AI image studio."""
+"""그려줘 (Geuryeojwo) - standalone local AI image studio (v0.2, ComfyUI 기반)."""
 from __future__ import annotations
 import sys
 from pathlib import Path

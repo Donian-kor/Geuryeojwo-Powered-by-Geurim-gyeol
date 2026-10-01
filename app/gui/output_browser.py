@@ -114,17 +114,12 @@ class OutputBrowser(QWidget):
             item.setData(0, Qt.UserRole, str(png_path))
             item.setData(1, Qt.UserRole, metadata)
 
-            date_item = QTreeWidgetItem([date_str, "", ""])
-            date_item.setData(0, Qt.UserRole, "date")
-            date_item.appendChild(item)
-
+            # 날짜별 그룹 아래에 넣는다
             top = self._ensure_date_item(date_str)
             top.addChild(item)
 
-        # 정리
-        for i in range(self.tree.topLevelItemCount()):
-            top_item = self.tree.topLevelItem(i)
-            top_item.expandAll()
+        # 날짜 그룹을 모두 펼친다 (expandAll 은 트리 위젯 메서드다)
+        self.tree.expandAll()
 
     def _ensure_date_item(self, date_str: str):
         """날짜별 그룹 아이템 가져오기."""
