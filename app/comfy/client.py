@@ -225,6 +225,21 @@ class ComfyClient:
         except ComfyUIError:
             return {"queue_running": [], "queue_pending": []}
 
+    async def post_free(self) -> None:
+        """POST /free — 로드된 모델을 내리고 VRAM 을 반환한다.
+
+        종료 직전에 호출하면 프로세스를 끝까지 살려두면서도
+        GPU 메모리를 빠르게 확보할 수 있다.
+        """
+        try:
+            await self._post(
+                "/free",
+                {"unload_models": True, "free_memory": True},
+                timeout=15,
+            )
+        except ComfyUIError:
+            pass
+
     async def get_samplers(self) -> dict[str, list[str]]:
         """KSampler 노드 정의에서 sampler/scheduler 목록을 뽑는다.
 

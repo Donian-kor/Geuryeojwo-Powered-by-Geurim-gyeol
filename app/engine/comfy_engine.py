@@ -164,14 +164,41 @@ class GeurimGyeolEngine:
 
         이 프로그램이 띄운 서버만 종료하며, 사용자가 직접 실행한
         ComfyUI 는 건드리지 않는다.
+
+        VRAM 이 즉시 풀려야 하므로 모델을 먼저 해제하고,
+        그래도 안 죽으면 강제로 끝낸다.
         """
         proc = self._launched_process
-        if proc is None or proc.poll() is not None:
+        if proc is None:
+            return
+        if proc.poll() is not None:
             self._launched_process = None
             return
+
         self.logger.info("내가 실행한 ComfyUI 를 종료합니다 (pid=%s).", proc.pid)
-        proc.terminate()
-        self._launched_process = None
+
+        # 1) 모델부터 해제해 VRAM 이 빨리 반환되게 한다
+        # (서버가 살아 있을 때만 — 죽었으면 연결 시도가 오래 걸린다)
+        if self.system_info.online or self.online:
+            try:
+                asyncio.run(self.client.post_free())
+            except Exception:
+                pass
+
+        # 2) 정상 종료 시도
+        try:
+            proc.terminate()
+            proc.wait(timeout=10)
+        except Exception:
+            # 3) 그래도 살아 있으면 강제 종료 (VRAM 은 프로세스 종료와 함께 풀린다)
+            self.logger.warning("ComfyUI 가 정상 종료되지 않아 강제 종료합니다.")
+            try:
+                proc.kill()
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+        finally:
+            self._launched_process = None
 
     @property
     def online(self) -> bool:

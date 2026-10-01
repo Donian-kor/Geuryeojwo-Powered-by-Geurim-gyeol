@@ -1,5 +1,5 @@
 from __future__ import annotations
-import sys, logging
+import sys, logging, atexit
 from pathlib import Path
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QPixmap
@@ -577,4 +577,11 @@ def run():
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s"
     )
-    app=QApplication(sys.argv); win=MainWindow(); win.show(); return app.exec()
+    app=QApplication(sys.argv); win=MainWindow(); win.show()
+
+    # 창을 닫지 않고 프로그램이 끝나는 경로에서도 ComfyUI 를 정리한다.
+    # (Ctrl+C, aboutToQuit 등 closeEvent 가 호출되지 않을 수 있다)
+    atexit.register(win.engine.shutdown)
+    app.aboutToQuit.connect(win.engine.shutdown)
+
+    return app.exec()

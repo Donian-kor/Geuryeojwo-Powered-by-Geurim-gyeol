@@ -7,6 +7,7 @@ GUI 와 동일한 코드 경로를 검증한다.
 import asyncio
 import io
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -562,6 +563,80 @@ def test_stop_launched_only_stops_own_process(workflow_dir):
     eng.stop_launched()
     assert proc.terminated is True
     assert eng._launched_process is None
+
+
+def test_shutdown_stops_launched_process(tmp_path: Path):
+    """shutdown() 이 띄운 프로세스를 종료한다.
+
+    회귀 방지: 창을 닫으면 ComfyUI 도 같이 내려가야 한다.
+    """
+    import subprocess
+
+    eng = GeurimGyeolEngine(tmp_path)
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    eng._launched_process = proc
+    try:
+        eng.shutdown()
+        assert proc.poll() is not None, "프로세스가 종료되어야 한다"
+        assert eng._launched_process is None
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def test_shutdown_force_kills_unresponsive_process(tmp_path: Path):
+    """정상 종료가 안 되는 프로세스는 강제로 끝낸다 (VRAM 회수 보장).
+
+    회귀 방지: terminate 로 죽지 않아도 프로세스가 남으면
+    VRAM 이 그대로 점유된다.
+    """
+    import subprocess
+
+    eng = GeurimGyeolEngine(tmp_path)
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    eng._launched_process = proc
+
+    killed = {"n": 0}
+    real_kill = proc.kill
+
+    # terminate 는 무력화하고, wait 는 계속 타임아웃시키며,
+    # kill 만 실제로 프로세스를 죽이도록 한다
+    def _always_timeout(timeout=None):
+        raise TimeoutError("종료되지 않음")
+
+    def _real_kill():
+        killed["n"] += 1
+        real_kill()
+
+    proc.terminate = lambda: None
+    proc.wait = _always_timeout
+    proc.kill = _real_kill
+    eng.system_info.online = False
+
+    try:
+        eng.shutdown()
+        assert killed["n"] == 1, "강제 종료(kill)가 호출되어야 한다"
+        proc.wait = proc.wait  # 복구
+        deadline = 10
+        while proc.poll() is None and deadline > 0:
+            import time as _t
+            _t.sleep(0.2)
+            deadline -= 1
+        assert proc.poll() is not None, "프로세스가 없어야 한다"
+    finally:
+        if proc.poll() is None:
+            real_kill()
+
+
+def test_shutdown_without_process_is_noop(tmp_path: Path):
+    """띄운 프로세스가 없으면 아무 일도 하지 않는다."""
+    GeurimGyeolEngine(tmp_path).shutdown()
 
 
 # --- 이벤트 루프 재사용 (회귀 방지) ----------------------------------
