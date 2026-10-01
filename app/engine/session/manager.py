@@ -189,3 +189,73 @@ class SessionManager:
             encoding="utf-8",
         )
         return [target_image, target_json]
+
+    def remove_image_from_session(
+        self,
+        session_path: Path,
+        image_name: str,
+    ) -> bool:
+        """세션에서 이미지 한 장과 그 메타데이터를 삭제한다.
+
+        세션 폴더 전체가 아니라 이미지 단위로 지울 때 쓴다.
+        images 목록도 함께 갱신해야 나중에 목록을 다시 읽어도
+        없는 파일이 다시 나타나지 않는다.
+
+        Returns:
+            bool: 실제 삭제되었으면 True
+        """
+        import json as _json
+
+        meta_path = session_path / "session.json"
+        if not meta_path.exists():
+            return False
+
+        target_image = session_path / image_name
+        if not target_image.exists():
+            return False
+
+        metadata = SessionMetadata.from_dict(
+            _json.loads(meta_path.read_text(encoding="utf-8"))
+        )
+        entry = next(
+            (e for e in metadata.images if e.get("filename") == image_name),
+            None,
+        )
+
+        target_image.unlink()
+        target_json = target_image.with_suffix(".json")
+        if target_json.exists():
+            target_json.unlink()
+
+        if entry is not None:
+            metadata.images.remove(entry)
+        # images 가 비었다면 session.json 이 통째로 사라진 상태다.
+        # 그래도 남겨 둔다 (빈 세션으로 보여주는 편이 삭제 실패보다 낫다)
+        meta_path.write_text(
+            _json.dumps(metadata.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return True
+
+    def list_source_outputs(self) -> set[str]:
+        """모든 세션이 참조한 원본 outputs/ 경로 집합을 반환한다.
+
+        통합 브라우저에서 "세션이 없는 출력"을 찾아내는 데 쓴다.
+        경로는 서로 다른 표기(슬래시/대소문자)를 가질 수 있어
+        정규화해서 비교한다.
+        """
+        import json as _json
+        import os
+
+        sources: set[str] = set()
+        for session_path in self.list_sessions():
+            meta_path = session_path / "session.json"
+            try:
+                data = _json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            for entry in data.get("images", []):
+                source = entry.get("source")
+                if source:
+                    sources.add(os.path.normcase(os.path.abspath(source)))
+        return sources
