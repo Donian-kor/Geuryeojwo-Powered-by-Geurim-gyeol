@@ -83,6 +83,7 @@ class ModelInfoPanel(QGroupBox):
         self.negative_label = QLabel("-")
         self.est_vram_label = QLabel("-")
         self.avail_vram_label = QLabel("-")
+        self.budget_label = QLabel(self.engine.vram_budget.describe())
         self.device_label = QLabel("-")
         self.status_label = QLabel("-")
 
@@ -92,6 +93,7 @@ class ModelInfoPanel(QGroupBox):
         layout.addRow("Negative Prompt:", self.negative_label)
         layout.addRow("Estimated VRAM:", self.est_vram_label)
         layout.addRow("Available VRAM:", self.avail_vram_label)
+        layout.addRow("VRAM Budget:", self.budget_label)
         layout.addRow("Device:", self.device_label)
         layout.addRow("Status:", self.status_label)
 
@@ -118,12 +120,18 @@ class ModelInfoPanel(QGroupBox):
         )
         self.est_vram_label.setText(f"{estimated:.1f} GB" if estimated else "-")
         self.avail_vram_label.setText(self._vram_text(snap))
+        budget = self.engine.vram_budget
+        self.budget_label.setText(budget.describe())
         self.device_label.setText(f"{self.engine.hardware.backend} ({self.engine.hardware.name})")
 
         if not supported:
             self.status_label.setText("⚠ Unsupported architecture")
             return
-        if snap.vram_free_gb is not None and estimated and estimated + 0.5 > snap.vram_free_gb:
+
+        fits, _ = budget.can_fit(estimated)
+        if not fits:
+            self.status_label.setText("⚠ VRAM 예산 초과 — 설정 변경 필요")
+        elif snap.vram_free_gb is not None and estimated and estimated + 0.5 > snap.vram_free_gb:
             self.status_label.setText("⚠ VRAM 부족 — 설정 하향 권장")
         else:
             self.status_label.setText("✅ Ready")
@@ -169,6 +177,7 @@ class MainWindow(QWidget):
         self.dry_run_btn=QPushButton("환경 검사 (Dry Run)"); self.dry_run_btn.clicked.connect(self._run_dry_run)
         btns.addWidget(self.theme_toggle); btns.addWidget(self.dry_run_btn); btns.addStretch()
         root.addLayout(btns)
+        root.addWidget(self._build_vram_box())
 
         tabs=QTabWidget(); root.addWidget(tabs)
         tabs.addTab(self._build_preview_tab(), "Prompt Preview")
@@ -185,6 +194,57 @@ class MainWindow(QWidget):
         self.status_msg=QLabel("준비됨"); status_bar.addWidget(self.status_msg)
         root.addLayout(status_bar)
         self._mem_timer=QTimer(); self._mem_timer.timeout.connect(self._update_status_bar); self._mem_timer.start(1000)
+
+    def _build_vram_box(self) -> QGroupBox:
+        """VRAM 한도 설정 UI (v0.1 §8.4).
+
+        기본값은 보수적 8 GB이며, 자동 감지 / 사용자 지정 / 제한 없음으로
+        변경할 수 있다.
+        """
+        box=QGroupBox("VRAM 한도"); layout=QVBoxLayout(box)
+        row=QHBoxLayout()
+
+        self.vram_mode=QComboBox()
+        self.vram_mode.addItem("기본값 (8 GB, 보수적)", "default")
+        self.vram_mode.addItem("자동 감지 (내 GPU에 맞춤)", "auto")
+        self.vram_mode.addItem("사용자 지정", "custom")
+        self.vram_mode.addItem("제한 없음 (고사양 PC)", "unlimited")
+
+        current=self.engine.vram_budget.mode
+        index=self.vram_mode.findData(current)
+        self.vram_mode.setCurrentIndex(max(0, index))
+
+        self.vram_value=QDoubleSpinBox()
+        self.vram_value.setRange(1.0, 128.0); self.vram_value.setSingleStep(0.5)
+        self.vram_value.setValue(self.engine.vram_budget.custom_gb or 8.0)
+        self.vram_value.setSuffix(" GB")
+        self.vram_value.setEnabled(current == "custom")
+
+        row.addWidget(QLabel("기준:"))
+        row.addWidget(self.vram_mode, 1)
+        row.addWidget(self.vram_value)
+        layout.addLayout(row)
+
+        self.vram_mode.currentIndexChanged.connect(self._on_vram_mode_changed)
+        self.vram_value.valueChanged.connect(self._apply_vram_limit)
+
+        self.vram_info=QLabel(self.engine.vram_budget.describe())
+        self.vram_info.setStyleSheet("color:#a0a0a0; font-size:12px;")
+        layout.addWidget(self.vram_info)
+        return box
+
+    def _on_vram_mode_changed(self) -> None:
+        """모드 변경 시 custom 입력란을 활성화한다."""
+        self.vram_value.setEnabled(self.vram_mode.currentData() == "custom")
+        self._apply_vram_limit()
+
+    def _apply_vram_limit(self) -> None:
+        """VRAM 한도 설정을 저장한다 (v0.1 §3.4)."""
+        mode = self.vram_mode.currentData()
+        budget = self.engine.set_vram_limit(mode, self.vram_value.value())
+        self.vram_info.setText(budget.describe())
+        if hasattr(self, 'model_info'):
+            self.model_info.refresh(self.image.currentData())
 
     def _build_preview_tab(self) -> QWidget:
         """Prompt Preview 탭 (v0.1 §25)."""
@@ -254,7 +314,8 @@ class MainWindow(QWidget):
                 msg += "경고:\n" + "\n".join(result.warnings) + "\n\n"
             if result.errors:
                 msg += "오류:\n" + "\n".join(result.errors) + "\n\n"
-            msg += f"VRAM: {result.available_vram_gb}GB available / {result.total_vram_gb}GB total\n"
+            msg += f"VRAM 예산: {result.vram_budget}\n" if result.vram_budget else ""
+            msg += f"VRAM: {result.available_vram_gb}GB 사용 가능 / {result.total_vram_gb}GB 전체\n"
             msg += f"예상 이미지 메모리: {result.estimated_image_memory_gb}GB"
             QMessageBox.information(self, "환경 검사 결과", msg)
         except Exception as e:

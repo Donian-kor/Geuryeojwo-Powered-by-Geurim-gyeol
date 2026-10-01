@@ -21,10 +21,11 @@ class ImagePipelineManager:
         "flux": FluxAdapter,
     }
 
-    def __init__(self, hardware, memory, logger):
+    def __init__(self, hardware, memory, logger, budget=None):
         self.hardware = hardware
         self.memory = memory
         self.logger = logger
+        self.budget = budget
         self._adapter: ImageModelAdapter | None = None
         self._current_arch: str | None = None
 
@@ -42,16 +43,36 @@ class ImagePipelineManager:
         return adapter_cls(self.hardware, self.logger).estimate_memory()
 
     def check_vram(self, architecture: str) -> tuple[bool, str]:
-        """OOM Protection (v0.1 §8.4): estimate VRAM vs available."""
+        """OOM Protection (v0.1 §8.4).
+
+        예산 정책(기본 8GB / 자동 감지 / 사용자 지정 / 제한 없음)을 적용하고,
+        실제로 남은 VRAM도 함께 고려한다.
+        """
+        est = self.estimate_memory(architecture)
+        if not est:
+            return True, "예상 VRAM 정보 없음 — 계속 진행"
+
+        # 1) 예산 정책 검사
+        if self.budget is not None:
+            ok, message = self.budget.can_fit(est)
+            if not ok:
+                return False, message
+            policy_message = message
+        else:
+            policy_message = ""
+
+        # 2) 실제 남은 VRAM 검사
         try:
             import torch
+
             if not torch.cuda.is_available():
-                return True, "CPU mode — no VRAM limit"
+                return True, "CPU 모드 — VRAM 제한 없음"
+
             free, total = torch.cuda.mem_get_info()
             free_gb = free / 1024**3
             total_gb = total / 1024**3
-            est = self.estimate_memory(architecture)
-            margin = 0.5  # GB safety margin
+
+            margin = self.budget.safety_margin_gb if self.budget else 0.5
             if est + margin > free_gb:
                 if est > total_gb:
                     return False, (
@@ -63,11 +84,11 @@ class ImagePipelineManager:
                     f"이 사용 가능 VRAM ({free_gb:.1f} GB)을 초과합니다. "
                     f"해상도를 낮추거나 Steps를 줄이세요."
                 )
-            return True, (
-                f"VRAM OK: {est:.1f} GB / {free_gb:.1f} GB 사용 가능"
-            )
+
+            suffix = f" ({policy_message})" if policy_message else ""
+            return True, f"VRAM OK: {est:.1f} GB / {free_gb:.1f} GB 사용 가능{suffix}"
         except Exception:
-            return True, "VRAM 확인 불가 — 계속 진행"
+            return True, policy_message or "VRAM 확인 불가 — 계속 진행"
 
     def load(self, model_path: Path, architecture: str) -> None:
         """Adapter 선택 후 모델 로드 + OOM 사전 검증."""

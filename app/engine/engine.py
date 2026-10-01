@@ -1,8 +1,10 @@
 from __future__ import annotations
+import json
 import logging
 from pathlib import Path
 from .hardware.detector import detect_hardware
 from .memory.manager import MemoryManager
+from .memory.budget import VramBudgetManager
 from .models.registry import ModelRegistry
 from .prompt.engine import PromptEngine
 from .image.pipeline import ImagePipelineManager
@@ -11,6 +13,30 @@ from .generation.task_runner import TaskRunner
 from .logging.manager import LogManager
 from .error.handler import ErrorHandler, ErrorType, RecoverySuggestion
 from .validation.dry_run import DryRunMode, ModelValidator
+
+_config_logger = logging.getLogger("geurim-gyeol.config")
+
+
+def load_app_config(path: Path) -> dict:
+    """app_config.json을 읽는다 (v0.1 §3.4 Configuration Driven)."""
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        _config_logger.error("설정 파일 읽기 실패 (%s): %s", path, exc)
+        return {}
+
+
+def save_app_config(path: Path, config: dict) -> None:
+    """app_config.json을 저장한다."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception as exc:
+        _config_logger.error("설정 파일 저장 실패 (%s): %s", path, exc)
 
 
 class GeurimGyeolEngine:
@@ -28,6 +54,8 @@ class GeurimGyeolEngine:
         self.logs = LogManager(root / "logs")
         self.logger = self.logs.get_logger("engine")
         self.hardware = detect_hardware()
+        self.config = load_app_config(root / "config" / "app_config.json")
+        self.vram_budget = VramBudgetManager.from_config(self.config, self.hardware.vram_gb)
         self.memory = MemoryManager(self.logs.memory)
         self.registry = ModelRegistry(
             root / "models",
@@ -40,7 +68,9 @@ class GeurimGyeolEngine:
             self.logger,
             root / "config" / "llm_profiles.json",
         )
-        self.image = ImagePipelineManager(self.hardware, self.memory, self.logger)
+        self.image = ImagePipelineManager(
+            self.hardware, self.memory, self.logger, budget=self.vram_budget
+        )
         self.task_runner = TaskRunner(self.logger)
         self.error_handler = ErrorHandler(self.logs.error)
         self.generation = GenerationController(
@@ -71,6 +101,14 @@ class GeurimGyeolEngine:
             "Image": [str(p) for p in image_models],
         })
         return llm_models, image_models
+
+    def set_vram_limit(self, mode: str, custom_gb: float | None = None):
+        """VRAM 제한 정책을 변경하고 저장한다 (v0.1 §3.4)."""
+        budget = self.vram_budget.set_mode(mode, custom_gb)
+        self.config.setdefault("memory", {}).update(self.vram_budget.to_config())
+        save_app_config(self.root / "config" / "app_config.json", self.config)
+        self.logger.info("VRAM 제한 변경: %s", budget.describe())
+        return budget
 
     def analyze_hardware(self) -> "HardwareInfo":
         """하드웨어 분석 결과를 반환한다 (v0.1 §7, §44.8)."""
