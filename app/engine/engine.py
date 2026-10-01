@@ -10,6 +10,7 @@ from .generation.controller import GenerationController
 from .generation.task_runner import TaskRunner
 from .logging.manager import LogManager
 from .error.handler import ErrorHandler, ErrorType, RecoverySuggestion
+from .validation.dry_run import DryRunMode, ModelValidator
 
 
 class GeurimGyeolEngine:
@@ -43,6 +44,8 @@ class GeurimGyeolEngine:
         )
         self.task_runner = TaskRunner(self.logger)
         self.error_handler = ErrorHandler(self.logs.error)
+        self.dry_runner = DryRunMode(self, self.logs.application)
+        self.model_validator = ModelValidator(self.logger)
         self._initialized = False
 
     def initialize(self) -> None:
