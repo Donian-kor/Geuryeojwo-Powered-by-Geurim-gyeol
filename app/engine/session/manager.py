@@ -5,7 +5,42 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from ..output.manager import next_index
+
+# Windows 파일명에서 쓸 수 없는 문자
+_ILLEGAL_CHARS = '\\/:*?"<>|'
+# 세션 폴더 이름에 넣을 프롬프트 최대 길이
+_SLUG_MAX = 32
+
+
+def _slugify(text: str, limit: int = _SLUG_MAX) -> str:
+    """프롬프트를 탐색기에서 알아보기 좋은 폴더명으로 바꾼다.
+
+    세션 폴더 이름은 사람이 읽는 것이 목적이므로 시각·순번을 넣지 않는다.
+    순서는 session.json 의 created_at 으로 정렬한다 (list_sessions).
+    """
+    if not text:
+        return "이미지"
+    cleaned = "".join("_" if ch in _ILLEGAL_CHARS else ch for ch in text.strip())
+    # 연속 공백을 하나로 모은다
+    cleaned = " ".join(cleaned.split())
+    # Windows 는 이름 끝의 공백과 마침표를 버린다
+    cleaned = cleaned.rstrip(" .")
+    if not cleaned:
+        return "이미지"
+    if len(cleaned) > limit:
+        cleaned = cleaned[:limit].rstrip(" .")
+    return cleaned or "이미지"
+
+
+def _read_created_at(meta_path: Path) -> str:
+    """session.json 의 created_at 을 읽는다 (실패 시 빈 문자열)."""
+    import json as _json
+
+    try:
+        data = _json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    return str(data.get("created_at", ""))
 
 
 @dataclass
@@ -90,21 +125,22 @@ class SessionManager:
         self.sessions_root.mkdir(parents=True, exist_ok=True)
 
     def create_session(self, metadata: SessionMetadata) -> Path:
-        """새 세션 디렉토리를 생성하고 session.json을 저장한다."""
+        """새 세션 디렉토리를 생성하고 session.json을 저장한다.
+
+        폴더 이름은 프롬프트에서 만들어 탐색기에서 알아보기 쉽게 한다.
+        같은 이름이 이미 있으면 -2, -3 … 을 붙여 기존 폴더를 덮어쓰지 않는다.
+        """
         date_str = datetime.now().strftime("%Y-%m-%d")
-        time_str = datetime.now().strftime("%H%M%S")
         date_dir = self.sessions_root / date_str
         date_dir.mkdir(parents=True, exist_ok=True)
 
-        # "개수 + 1" 대신 최대 번호 + 1 을 쓴다. 중간 세션이 지워졌을 때
-        # 살아있는 세션 폴더를 재사용해 session.json 을 덮어쓰는 것을 막는다.
-        index = next_index(
-            (p.name for p in date_dir.glob(f"{time_str}-*")),
-            prefix=f"{time_str}-",
-        )
-        session_id = f"{time_str}-{index:03d}"
-        session_dir = date_dir / session_id
-        session_dir.mkdir(parents=True, exist_ok=True)
+        slug = _slugify(metadata.original_prompt or metadata.enhanced_prompt)
+        session_dir = date_dir / slug
+        suffix = 2
+        while session_dir.exists():
+            session_dir = date_dir / f"{slug}-{suffix}"
+            suffix += 1
+        session_dir.mkdir(parents=True)
 
         meta_path = session_dir / "session.json"
         meta_path.write_text(
@@ -126,15 +162,23 @@ class SessionManager:
         return metadata, images
 
     def list_sessions(self) -> list[Path]:
-        """모든 세션 디렉토리를 날짜별로 정렬하여 반환한다."""
-        sessions = []
+        """모든 세션 디렉토리를 생성 시각 최신순으로 반환한다.
+
+        폴더 이름이 사람이 읽는 프롬프트 이름이라 순서를 담지 않는다.
+        그래서 정렬은 session.json 의 created_at 을 쓴다.
+        (ISO 형식이므로 문자열 비교가 곧 시간 비교다)
+        """
+        sessions: list[tuple[str, Path]] = []
         for date_dir in sorted(self.sessions_root.glob("*/"), reverse=True):
             if not date_dir.is_dir():
                 continue
-            for session_dir in sorted(date_dir.glob("*-*"), reverse=True):
-                if (session_dir / "session.json").exists():
-                    sessions.append(session_dir)
-        return sessions
+            for session_dir in date_dir.glob("*"):
+                meta_path = session_dir / "session.json"
+                if not meta_path.is_file():
+                    continue
+                sessions.append((_read_created_at(meta_path), session_dir))
+        sessions.sort(key=lambda pair: pair[0], reverse=True)
+        return [path for _, path in sessions]
 
     def delete_session(self, session_path: Path) -> None:
         """세션 디렉토리와 모든 내용을 삭제한다."""

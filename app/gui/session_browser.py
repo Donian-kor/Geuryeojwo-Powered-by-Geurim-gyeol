@@ -16,16 +16,19 @@ class HistoryBrowser(QWidget):
     """기록 브라우저 위젯.
 
     Output Browser 와 Session History 를 하나로 합친 위젯.
-    트리는 날짜 > 세션 > 이미지 3단계로 구성된다.
+    목록은 이미지 한 장이 한 줄이다 (썸네일 + 프롬프트 + seed + 시각).
+    여러 장을 뽑은 세션만 첫 줄 아래에 자식 행이 생긴다.
 
-    - sessions/YYYY-MM-DD/HHmmss-N/ 세션과 세션 안의 이미지를 브라우징한다
-    - 세션에 들어가지 않은 outputs/ 이미지��� 별도 그룹으로 보여준다
+    - sessions/YYYY-MM-DD/세션이름/ 의 이미지를 최신순으로 브라우징한다
+    - 세션에 들어가지 않은 outputs/ 이미지도 같은 목록 끝에 보여준다
     - 세션 메타데이터 (원본/강화 프롬프트, LLM, 워크플로) 확인
-    - 이미지 단위 메타데이터 확인
     - 프롬프트 복사 / 결과 재생성 (워크플로 자동 선택)
     - 이미지 삭제 / 세션 삭제
     - 폴더 열기 / 다른 이름으로 저장
     """
+
+    # 목록 한 줄에 붙는 썸네일 크기(px)
+    _THUMB_SIZE = 40
 
     regenerate_requested = Signal(str, dict, object)
     prompt_copied = Signal(str)
@@ -75,6 +78,11 @@ class HistoryBrowser(QWidget):
         self.tree = QTreeWidget()
         self.tree.setColumnCount(3)
         self.tree.setHeaderLabels(["항목", "Seed", "생성 일시"])
+        # 썸네일이 붙으므로 첫 열을 넓히고, Seed 는 잘리지 않게 고정폭을 준다
+        self.tree.setColumnWidth(0, 380)
+        self.tree.setColumnWidth(1, 150)
+        header = self.tree.header()
+        header.setStretchLastSection(True)
         self.tree.itemClicked.connect(self._on_item_selected)
         splitter.addWidget(self.tree)
 
@@ -118,7 +126,13 @@ class HistoryBrowser(QWidget):
     # ---------------------------------------------------------------- 트리
 
     def _refresh_list(self) -> None:
-        """세션 + 미분류 출력 목록을 새로고침."""
+        """기록을 한 줄짜리 목록으로 다시 만든다.
+
+        세션 하나가 이미지를 한 장만 가지므로 (batch_size 기본 1)
+        '날짜 > 세션 > 이미지' 3단계는 정보가 겹친다. 이미지가 1장이면
+        세션 행이 곧 이미지 행이므로 한 줄로 펴고, 첫 칸에 썸네일과
+        프롬프트를 함께 보여준다. 여러 장인 세션만 자식 행을 둔다.
+        """
         self.tree.clear()
         self._current_session = None
         self._current_image = None
@@ -131,42 +145,59 @@ class HistoryBrowser(QWidget):
             except Exception:
                 continue
 
-            date_item = self._ensure_date_item(session_path.parent.name)
-            session_item = QTreeWidgetItem([
-                session_path.name,
-                str(metadata.seed),
-                metadata.created_at,
-            ])
-            # 세션 노드는 재생성 시 워크플로를 되찾아야 하므로 이름을 함께 실어 둔다
-            session_item.setData(0, Qt.UserRole, ("session", str(session_path)))
-            session_item.setData(0, Qt.UserRole + 1, metadata.image_model)
-            date_item.addChild(session_item)
-
-            for img_path in images:
-                img_item = QTreeWidgetItem([img_path.name, "", ""])
-                img_item.setData(0, Qt.UserRole, ("image", str(session_path), str(img_path)))
-                session_item.addChild(img_item)
+            prompt = metadata.original_prompt or metadata.enhanced_prompt
+            parent_item = None
+            for image_path in images:
+                item = self._make_item(
+                    text=self._row_text(prompt, image_path, first=parent_item is None),
+                    seed=metadata.seed,
+                    created_at=metadata.created_at,
+                    payload=("session", str(session_path), str(image_path)),
+                    image_path=image_path,
+                )
+                if parent_item is None:
+                    parent_item = item
+                    self.tree.addTopLevelItem(item)
+                else:
+                    parent_item.addChild(item)
 
         self._add_ungrouped_outputs()
 
-        # 날짜·세션·이미지를 모두 펼친다.
-        # 예전에는 여기서 날짜 그룹을 다시 접었다. 그런데 생성이 끝나면
-        # done() 이 이 함수를 다시 불러, 방금 만든 세션이 접힌 날짜 안에
-        # 숨어 "세션이 안 남는 것"처럼 보였다. 펼친 상태를 유지한다.
-        self.tree.expandAll()
+    def _make_item(self, text: str, seed, created_at: str, payload: tuple,
+                   image_path: Path) -> QTreeWidgetItem:
+        """목록 한 줄을 만든다 (썸네일 + 텍스트 + seed + 시각)."""
+        item = QTreeWidgetItem([text, str(seed), created_at])
+        item.setData(0, Qt.UserRole, payload)
+        icon = self._thumbnail(image_path)
+        if icon is not None:
+            item.setIcon(0, icon)
+        return item
 
-    def _ensure_date_item(self, date_str: str) -> QTreeWidgetItem:
-        for i in range(self.tree.topLevelItemCount()):
-            item = self.tree.topLevelItem(i)
-            if item.text(0) == date_str:
-                return item
-        date_item = QTreeWidgetItem([date_str, "", ""])
-        date_item.setData(0, Qt.UserRole, ("date",))
-        self.tree.addTopLevelItem(date_item)
-        return date_item
+    def _row_text(self, prompt: str, image_path: Path, first: bool) -> str:
+        """첫 줄은 프롬프트, 이후 줄(다중 이미지)은 파일명으로 구분한다."""
+        if not first:
+            return image_path.name
+        text = " ".join((prompt or "").split())
+        if not text:
+            return image_path.name
+        if len(text) > 60:
+            text = text[:60].rstrip() + "…"
+        return text
+
+    def _thumbnail(self, image_path: Path) -> QPixmap | None:
+        """목록용 작은 썸네일. 읽을 수 없으면 None (텍스트만 표시)."""
+        if not image_path or not image_path.exists():
+            return None
+        pixmap = QPixmap(str(image_path))
+        if pixmap.isNull():
+            return None
+        return pixmap.scaled(
+            self._THUMB_SIZE, self._THUMB_SIZE,
+            Qt.KeepAspectRatio, Qt.SmoothTransformation,
+        )
 
     def _add_ungrouped_outputs(self) -> None:
-        """세션이 참조하지 않은 outputs/ 이미지를 '미분류' 그룹으로 추가한다.
+        """세션이 참조하지 않은 outputs/ 이미지를 목록 끝에 추가한다.
 
         생성 도중 세션 기록이 실패했거나 예전 버전에서 만든 이미지처럼
         세션에 속하지 않는 결과도 사라지지 않아야 한다.
@@ -178,7 +209,7 @@ class HistoryBrowser(QWidget):
         except Exception:
             referenced = set()
 
-        loose_by_date: dict[str, list[tuple[Path, object]]] = {}
+        loose: list[tuple[Path, object]] = []
         for png_path, _ in self.output_manager.list_outputs():
             key = os.path.normcase(os.path.abspath(str(png_path)))
             if key in referenced:
@@ -187,47 +218,41 @@ class HistoryBrowser(QWidget):
                 metadata, _ = self.output_manager.get_output(png_path)
             except Exception:
                 continue
-            loose_by_date.setdefault(png_path.parent.name, []).append((png_path, metadata))
+            loose.append((png_path, metadata))
 
-        for date_str, entries in sorted(loose_by_date.items(), reverse=True):
-            date_item = self._ensure_date_item(date_str)
-            group = QTreeWidgetItem([f"미분류 ({len(entries)})", "", ""])
-            group.setData(0, Qt.UserRole, ("loose_group",))
-            date_item.addChild(group)
-            for png_path, metadata in entries:
-                img_item = QTreeWidgetItem([png_path.name, str(metadata.seed), metadata.created_at])
-                # (이미지, 세션 경로 없음, 이미지 경로, 워크플로 이름)
-                img_item.setData(0, Qt.UserRole, ("loose", "", str(png_path), metadata.model))
-                group.addChild(img_item)
+        # 최신순으로 섞어 넣는다
+        for png_path, metadata in loose:
+            prompt = getattr(metadata, "original_prompt", "") or metadata.prompt
+            self.tree.addTopLevelItem(self._make_item(
+                text=self._row_text(prompt, png_path, first=True),
+                seed=metadata.seed,
+                created_at=metadata.created_at,
+                payload=("loose", "", str(png_path)),
+                image_path=png_path,
+            ))
 
     # ---------------------------------------------------------------- 선택
 
     def _on_item_selected(self, item: QTreeWidgetItem, column: int) -> None:
-        """트리 아이템 선택 처리."""
+        """목록 한 줄을 선택하면 곧바로 메타데이터와 미리보기를 보여준다.
+
+        한 줄짜리 목록이라 세션 행/이미지 행 구분이 없다. 한 줄이 곧
+        이미지 한 장이므로 클릭 1번으로 결과를 볼 수 있다.
+        """
         data = item.data(0, Qt.UserRole)
         kind = data[0] if isinstance(data, tuple) else None
 
-        if kind in (None, "date", "loose_group"):
-            self._current_session = None
-            self._current_image = None
+        if kind in ("session", "loose") and len(data) >= 3 and data[2]:
+            session_path = Path(data[1]) if data[1] else None
+            image_path = Path(data[2])
+            self._current_session = session_path
+            self._current_image = image_path
+            self._show_image_metadata(session_path, image_path)
+            self._show_preview(image_path)
             return
 
-        if kind == "session":
-            self._current_session = Path(data[1])
-            self._current_image = None
-            self._show_session_metadata(self._current_session)
-            self.image_preview.clear()
-            self.image_preview.setText("이미지를 선택해주세요")
-            return
-
-        # kind == "image" 또는 "loose"
-        session_path = Path(data[1]) if data[1] else None
-        image_path = Path(data[2])
-        self._current_session = session_path
-        self._current_image = image_path
-
-        self._show_image_metadata(session_path, image_path)
-        self._show_preview(image_path)
+        self._current_session = None
+        self._current_image = None
 
     def _clear_metadata(self) -> None:
         """우측 메타데이터/미리보기를 비운다."""
@@ -237,20 +262,6 @@ class HistoryBrowser(QWidget):
         self.lbl_params.setText("")
         self.image_preview.clear()
         self.image_preview.setText("이미지를 선택해주세요")
-
-    def _show_session_metadata(self, session_path: Path) -> None:
-        try:
-            metadata, _ = self.session_manager.get_session(session_path)
-        except Exception as e:
-            QMessageBox.warning(self, "오류", f"세션을 불러올 수 없습니다: {e}")
-            return
-
-        self.lbl_original.setText(metadata.original_prompt)
-        self.lbl_enhanced.setPlainText(metadata.enhanced_prompt)
-        self.lbl_negative.setPlainText(metadata.negative_prompt)
-        self.lbl_params.setText(self._format_params(
-            metadata.image_model, metadata.llm_model, metadata
-        ))
 
     def _show_image_metadata(self, session_path: Path | None, image_path: Path) -> None:
         """이미지 선택 시: 세션 정보에 그 이미지의 개별 메타데이터를 얹는다."""

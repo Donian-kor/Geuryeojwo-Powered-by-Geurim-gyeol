@@ -4,6 +4,7 @@
     """
 import json
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 from app.engine.output.manager import OutputManager, OutputMetadata
@@ -137,6 +138,112 @@ def test_output_metadata_version_matches_package(tmp_path):
     ))
     assert json.loads(js.read_text(encoding="utf-8"))["version"] == __version__
     assert __version__ != "0.1.0", "버전 문자열이 이전 판에 남아 있다"
+
+
+def test_session_folder_name_uses_prompt_not_number(tmp_path):
+    """세션 폴더 이름이 사람이 읽는 프롬프트 이름이다.
+
+    회귀: 194036-001 처럼 시각과 순번만 들어가 탐색기에서
+    무엇인지 알 수 없었다.
+    """
+    manager = SessionManager(tmp_path)
+    session = manager.create_session(SessionMetadata(
+        original_prompt="해변에서 수영하는 한국여자",
+        enhanced_prompt="해변에서 수영하는 한국여자",
+        negative_prompt="", llm_model=None, image_model="m",
+        seed=1, width=8, height=8, steps=4, cfg=4.0,
+    ))
+    assert session.name == "해변에서 수영하는 한국여자"
+    # 시각/순번 숫자가 이름에 섞이지 않는다
+    assert not session.name[0].isdigit(), session.name
+    assert (session / "session.json").exists()
+
+
+def test_session_folder_name_strips_illegal_chars(tmp_path):
+    """Windows 파일명에서 쓸 수 없는 문자가 제거된다."""
+    manager = SessionManager(tmp_path)
+    session = manager.create_session(SessionMetadata(
+        original_prompt='a cat: "cute" <best>/fancy? 100% |nice|',
+        enhanced_prompt="x", negative_prompt="", llm_model=None,
+        image_model="m", seed=1, width=8, height=8, steps=4, cfg=4.0,
+    ))
+    for ch in '\\/:*?"<>|':
+        assert ch not in session.name, f"{ch} 가 남아 있다: {session.name}"
+    assert (session / "session.json").exists()
+
+
+def test_session_folder_name_is_truncated_and_never_blank():
+    """긴 프롬프트는 잘리고, 빈 값이면 기본 이름을 쓴다."""
+    from app.engine.session.manager import _slugify
+
+    long_prompt = "가나다라마바사아자차카타파하가나다라마바사아자차카타파하"
+    assert len(_slugify(long_prompt)) <= 32
+
+    assert _slugify("") == "이미지"
+    assert _slugify("   ") == "이미지"
+    assert _slugify("...") == "이미지"
+    # 끝 공백/마침표는 Windows 가 버린다
+    assert _slugify("고양이 ...") == "고양이"
+
+
+def test_same_prompt_twice_does_not_overwrite(tmp_path):
+    """같은 프롬프트를 다시 생성해도 첫 세션을 덮어쓰지 않는다."""
+    manager = SessionManager(tmp_path)
+    meta = SessionMetadata(
+        original_prompt="고양이", enhanced_prompt="고양이", negative_prompt="",
+        llm_model=None, image_model="m", seed=1,
+        width=8, height=8, steps=4, cfg=4.0,
+    )
+    first = manager.create_session(meta)
+    marker = first / "keepme.txt"
+    marker.write_text("살아있는 세션", encoding="utf-8")
+
+    second = manager.create_session(meta)
+    assert second != first, "같은 폴더를 재사용했다"
+    assert marker.exists(), "첫 세션이 덮어써졌다"
+    assert (second / "session.json").exists()
+    assert len(manager.list_sessions()) == 2
+
+
+def test_list_sessions_sorted_by_created_at_not_name(tmp_path):
+    """이름이 아니라 생성 시각 최신순으로 정렬된다.
+
+    회귀: 폴더 이름에 시각이 없으므로 이름 정렬로는 newest-first 가
+    되지 않는다.
+    """
+    import json as _json
+
+    manager = SessionManager(tmp_path)
+    date_dir = tmp_path / datetime.now().strftime("%Y-%m-%d")
+    date_dir.mkdir(parents=True, exist_ok=True)
+
+    # 이름은 알파벳 역순, 시각은 오래된 순으로 일부러 만든다
+    for name, stamp in (("aaa-이름", "2026-01-01T00:00:00"),
+                        ("zzz-이름", "2026-06-01T00:00:00")):
+        d = date_dir / name
+        d.mkdir()
+        (d / "session.json").write_text(
+            _json.dumps({"created_at": stamp}), encoding="utf-8"
+        )
+
+    listed = [p.name for p in manager.list_sessions()]
+    assert listed == ["zzz-이름", "aaa-이름"], f"{listed}"
+
+
+def test_list_sessions_finds_legacy_numeric_folders(tmp_path):
+    """옛 형식(194036-001) 폴더도 계속 조회된다."""
+    import json as _json
+
+    manager = SessionManager(tmp_path)
+    date_dir = tmp_path / datetime.now().strftime("%Y-%m-%d")
+    date_dir.mkdir(parents=True, exist_ok=True)
+    legacy = date_dir / "194036-001"
+    legacy.mkdir()
+    (legacy / "session.json").write_text(
+        _json.dumps({"created_at": "2026-10-01T19:40:36"}), encoding="utf-8"
+    )
+
+    assert legacy in manager.list_sessions()
 
 
 def test_output_listing_roundtrip(tmp_path):
