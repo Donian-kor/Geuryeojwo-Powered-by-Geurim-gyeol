@@ -306,22 +306,52 @@ class MainWindow(QWidget):
         if "height" in params: self.h.setValue(params["height"])
         if "steps" in params: self.steps.setValue(params["steps"])
         if "cfg" in params: self.cfg.setValue(params["cfg"])
-        self.status.setText("재생성할 파라미터가 설정되었습니다. Generate 버튼을 클릭하세요.")
+        for field, combo in (
+            ("sampler", self.sampler), ("scheduler", self.scheduler),
+        ):
+            if field in params and combo.findText(params[field]) >= 0:
+                combo.setCurrentIndex(combo.findText(params[field]))
+        self.status.setText("파라미터를 불러왔습니다. 그려줘를 눌러주세요.")
 
-    def _on_regenerate_from_session(self, prompt: str, params: dict, image_model: Path) -> None:
+    def _on_regenerate_from_session(self, prompt: str, params: dict, image_model: str) -> None:
         """Session History에서 재생성 요청."""
         self.prompt.setPlainText(prompt)
         if "width" in params: self.w.setValue(params["width"])
         if "height" in params: self.h.setValue(params["height"])
         if "steps" in params: self.steps.setValue(params["steps"])
         if "cfg" in params: self.cfg.setValue(params["cfg"])
-        # 기록된 워크플로가 있으면 선택한다 (없으면 현재 선택 유지)
+        # sampler/scheduler 도 복원한다
+        for field, combo in (
+            ("sampler", self.sampler), ("scheduler", self.scheduler),
+        ):
+            if field in params and combo.findText(params[field]) >= 0:
+                combo.setCurrentIndex(combo.findText(params[field]))
+
+        # 세션에는 워크플로 이름이 저장되어 있다 (v0.2 에서는 모델 경로가 아니다)
         name = str(image_model)
+        index = self._find_workflow_index(name)
+        if index >= 0:
+            self.workflow.setCurrentIndex(index)
+            self.status.setText("세션의 워크플로와 파라미터를 불러왔습니다. 그려줘를 눌러주세요.")
+        else:
+            self.status.setText(
+                f"파라미터를 불러왔습니다. (워크플로 '{name}' 을 찾을 수 없어 "
+                "현재 선택을 유지합니다.) 그려줘를 눌러주세요."
+            )
+
+    def _find_workflow_index(self, name: str) -> int:
+        """이름 또는 파일명으로 워크플로 인덱스를 찾는다.
+
+        세션에 저장되는 값은 워크플로 표시 이름이고, 드롭다운의 data 는
+        파일명이므로 둘 다 확인해야 한다.
+        """
+        stem = name if name.endswith(".json") else f"{name}.json"
         for i in range(self.workflow.count()):
-            if self.workflow.itemData(i) == name:
-                self.workflow.setCurrentIndex(i)
-                break
-        self.status.setText("세션에서 재생성할 파라미터가 설정되었습니다. 그려줘를 눌러주세요.")
+            if name in (self.workflow.itemText(i), self.workflow.itemData(i)):
+                return i
+            if stem == f"{self.workflow.itemData(i)}.json":
+                return i
+        return -1
 
     def refresh_models(self):
         """ComfyUI 상태와 workflows/ 목록을 갱신한다.

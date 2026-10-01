@@ -321,6 +321,40 @@ def test_session_metadata_matches_output(engine, fake_comfy):
     assert session["original_prompt"] == "강아지"
 
 
+def test_session_metadata_roundtrip_preserves_sampler(engine, fake_comfy):
+    """세션을 다시 읽어도 sampler/scheduler 가 유지된다.
+
+    회귀 방지: 재생성 기능이 이 값으로 드롭다운을 되돌린다.
+    """
+    import json as _json
+
+    fake_comfy["images"] = [{"filename": "a.png", "subfolder": ""}]
+    engine.generate(
+        engine.build_request(prompt="x", extra={"sampler_name": "lms"})
+    )
+
+    session_dir = engine.sessions.list_sessions()[0]
+    data = _json.loads((session_dir / "session.json").read_text(encoding="utf-8"))
+    assert data["sampler"] == "lms"
+    assert data["image_model"] == "테스트 워크플로"
+
+
+def test_session_records_workflow_name_not_path(engine, fake_comfy):
+    """세션에는 워크플로 이름이 기록된다 (모델 경로가 아니다).
+
+    재생성이 이 이름으로 드롭다운을 찾으므로 이름이어야 한다.
+    """
+    import json as _json
+
+    fake_comfy["images"] = [{"filename": "a.png", "subfolder": ""}]
+    engine.generate(engine.build_request(prompt="x"))
+
+    session_dir = engine.sessions.list_sessions()[0]
+    data = _json.loads((session_dir / "session.json").read_text(encoding="utf-8"))
+    assert data["image_model"] == engine.active_workflow.name
+    assert not data["image_model"].endswith(".json")
+
+
 # --- 파라미터 키와 입력 이름의 불일치 (회귀 방지) ---------------------
 
 

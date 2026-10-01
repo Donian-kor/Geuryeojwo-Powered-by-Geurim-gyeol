@@ -218,6 +218,8 @@ class OutputBrowser(QWidget):
                 "height": metadata.height,
                 "steps": metadata.steps,
                 "cfg": metadata.cfg,
+                "sampler": metadata.sampler,
+                "scheduler": metadata.scheduler,
             },
         )
 

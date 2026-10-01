@@ -229,8 +229,10 @@ class SessionHistoryBrowser(QWidget):
                     "height": metadata.height,
                     "steps": metadata.steps,
                     "cfg": metadata.cfg,
+                    "sampler": metadata.sampler,
+                    "scheduler": metadata.scheduler,
                 },
-                Path(metadata.image_model),
+                metadata.image_model,
             )
         except Exception as e:
             QMessageBox.warning(self, "오류", f"재생성할 수 없습니다: {e}")
