@@ -7,6 +7,7 @@ from .models.registry import ModelRegistry
 from .prompt.engine import PromptEngine
 from .image.pipeline import ImagePipelineManager
 from .generation.controller import GenerationController
+from .generation.task_runner import TaskRunner
 
 
 class GeurimGyeolEngine:
@@ -37,6 +38,7 @@ class GeurimGyeolEngine:
             self, self.registry, self.prompt, self.memory, self.logger,
             root / "outputs"
         )
+        self.task_runner = TaskRunner(self.logger)
         self._initialized = False
 
     def initialize(self) -> None:

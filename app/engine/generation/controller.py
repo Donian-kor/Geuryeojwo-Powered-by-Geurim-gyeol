@@ -1,8 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
-import json, time
+import time
 
 
 @dataclass
@@ -40,6 +39,11 @@ class GenerationController:
         self.cancelled = True
 
     def run(self, req: GenerationRequest, progress=None) -> GenerationResult:
+        from ..output.manager import OutputManager, OutputMetadata
+        from ..session.manager import SessionManager, SessionMetadata
+
+        output_manager = OutputManager(self.output_root)
+        session_manager = SessionManager(self.output_root.parent / "sessions")
         self.cancelled = False
         started = time.perf_counter()
         image_profile = self.registry.profile_for(req.image_path)
@@ -86,36 +90,50 @@ class GenerationController:
                 req.steps, req.cfg, req.seed, p,
             )
 
-            date_dir = self.output_root / datetime.now().strftime("%Y-%m-%d")
-            date_dir.mkdir(parents=True, exist_ok=True)
-            index = len(list(date_dir.glob("img_*.png"))) + 1
-            out = date_dir / f"img_{index:03d}_seed{seed}.png"
-            image.save(out)
+            output_meta = OutputMetadata(
+                seed=seed,
+                model=str(req.image_path),
+                prompt=positive,
+                negative_prompt=negative,
+                width=req.width,
+                height=req.height,
+                steps=req.steps,
+                cfg=req.cfg,
+                sampler=getattr(image_profile, 'sampler', "euler_a"),
+                scheduler=getattr(image_profile, 'scheduler', "default"),
+                elapsed_seconds=round(time.perf_counter() - started, 2),
+                llm_model=str(req.llm_path) if req.llm_path else None,
+            )
 
-            meta = {
-                "app": "Geuryeojwo",
-                "version": "0.1.0",
-                "engine": "Geurim-gyeol",
-                "created_at": datetime.now().isoformat(timespec="seconds"),
-                "prompt": positive,
-                "negative_prompt": negative,
-                "seed": seed,
-                "width": req.width,
-                "height": req.height,
-                "steps": req.steps,
-                "cfg": req.cfg,
-                "image_model": str(req.image_path),
-                "llm_model": str(req.llm_path) if req.llm_path else None,
-                "elapsed_seconds": round(time.perf_counter() - started, 2),
-            }
-            out.with_suffix(".json").write_text(
-                json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+            png_path, json_path = output_manager.save_output(image, output_meta)
+            meta = output_meta.to_dict()
+
+            session_meta = SessionMetadata(
+                original_prompt=req.prompt,
+                enhanced_prompt=positive,
+                negative_prompt=negative,
+                llm_model=str(req.llm_path) if req.llm_path else None,
+                image_model=str(req.image_path),
+                seed=seed,
+                width=req.width,
+                height=req.height,
+                steps=req.steps,
+                cfg=req.cfg,
+                sampler=getattr(image_profile, 'sampler', "euler_a"),
+                scheduler=getattr(image_profile, 'scheduler', "default"),
+                generation_time=round(time.perf_counter() - started, 2),
+            )
+            session_path = session_manager.create_session(session_meta)
+            session_manager.add_image_to_session(
+                session_path, session_meta, png_path, 1
             )
 
             self.memory.take_snapshot("after_generation")
 
             if progress: progress(100, "완료")
-            return GenerationResult(image_path=out, metadata=meta)
+            result = GenerationResult(image_path=png_path, metadata=meta)
+            result.session_path = session_path
+            return result
 
         finally:
             if llm:
