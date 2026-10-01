@@ -34,6 +34,36 @@ python main.py
 
 No external AI server should be running or configured.
 
+### GPU (권장) — CUDA 빌드 설치
+
+기본 `pip install torch`는 **CPU 전용 빌드**가 설치되어 GPU를 사용하지 못합니다.
+GPU를 사용하려면 PyTorch 공식 CUDA 인덱스로 설치해야 합니다.
+
+```bash
+# CUDA 13 (RTX 50-series / Blackwell 권장)
+pip install torch --index-url https://download.pytorch.org/whl/cu130
+
+# CUDA 12.8 (RTX 40-series 이하)
+pip install torch --index-url https://download.pytorch.org/whl/cu128
+```
+
+설치 후 확인:
+
+```bash
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+```
+
+`True`가 나오면 GPU를 사용합니다. `False`면 CPU 폴백(float32)으로 동작하며
+실행 시 GUI 상단에 원인과 해결 방법이 표시됩니다.
+
+### 폴백 동작 (v0.1 §7)
+
+| 환경 | device | 정밀도 | 비고 |
+|---|---|---|---|
+| CUDA | `cuda` | float16 | VRAM 감지, OOM 보호 적용 |
+| Apple Silicon | `mps` | float16 | VRAM 미지원 |
+| 그 외 | `cpu` | float32 | 속도 저하, 해상도·steps 제한 필요 |
+
 ## Memory lifecycle
 
 1. Detect CUDA/MPS/CPU.

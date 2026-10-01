@@ -150,10 +150,19 @@ class MainWindow(QWidget):
         self.hw_label=QLabel(f"Backend: {self.engine.hardware.backend}"); hw_layout.addRow("Backend:",self.hw_label)
         self.hw_name=QLabel(f"Device: {self.engine.hardware.name}"); hw_layout.addRow("Device:",self.hw_name)
         self.hw_dtype=QLabel(f"Precision: {self.engine.hardware.dtype}"); hw_layout.addRow("Precision:",self.hw_dtype)
-        self.hw_vram=QLabel(f"VRAM: {f'{self.engine.hardware.vram_gb:.1f} GB' if self.engine.hardware.vram_gb else 'N/A'}"); hw_layout.addRow("VRAM:",self.hw_vram)
+        vram=self.engine.hardware.vram_gb
+        self.hw_vram=QLabel(f"VRAM: {vram:.1f} GB" if vram else "N/A (CPU 모드)"); hw_layout.addRow("VRAM:",self.hw_vram)
         self.llm_count=QLabel(f"LLM: {len(self.engine.registry.scan_llm())} found"); hw_layout.addRow("Models:",self.llm_count)
         self.image_count=QLabel(f"Image: {len(self.engine.registry.scan_image())} found"); hw_layout.addRow("",self.image_count)
         root.addWidget(hw_box)
+
+        hw_warning=self.engine.hardware.warning
+        if hw_warning:
+            warn_box=QGroupBox("⚠ 하드웨어 경고"); warn_layout=QVBoxLayout(warn_box)
+            warn=QLabel(hw_warning); warn.setWordWrap(True)
+            warn.setStyleSheet("color:#ffd93d;")
+            warn_layout.addWidget(warn); root.addWidget(warn_box)
+            self.log_warning=hw_warning
         
         btns=QHBoxLayout()
         self.theme_toggle=QPushButton("다크/라이트 전환"); self.theme_toggle.clicked.connect(self._toggle_theme)
