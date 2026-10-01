@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -68,7 +69,7 @@ class GeurimGyeolEngine:
     """v0.2 엔진.
 
     GUI 가 동기적으로 호출하는 facade 이다.
-    내부적으로 ComfyClient(비동기)를 asyncio.run 으로 감싼다.
+    내부적으로 ComfyClient(비동기)를 소유한 이벤트 루프에서 실행한다.
     """
 
     def __init__(self, root: Path):
@@ -88,6 +89,34 @@ class GeurimGyeolEngine:
         # 이 프로그램이 직접 띄운 ComfyUI 프로세스 (자동 실행 시에만 채워짐)
         self._launched_process = None
 
+        # ComfyUI 통신용 이벤트 루프를 하나만 두고 재사용한다.
+        # (GUI 스레드와 QThread 워커가 함께 쓸 수 있으므로 직렬화한다)
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._loop_lock = threading.RLock()
+
+    def _run(self, coro):
+        """코루틴을 소유 이벤트 루프에서 실행한다.
+
+        asyncio.run 을 쓰면 호출마다 루프가 새로 만들어졌다 닫히므로
+        httpx.AsyncClient 가 호출 횟수만큼 새로 생기고, 앞의 것들은
+        aclose() 되지 않은 채 GC 에 맡겨진다. 루프를 하나만 두면
+        클라이언트가 그대로 재사용된다.
+
+        GUI 스레드와 워커 스레드가 함께 호출할 수 있어 잠금으로
+        직렬화한다. 이벤트 루프는 실행되지 않는 한 스레드에 묶이지
+        않으므로, 겹치지 않는 한 어느 스레드에서든 돌려도 된다.
+        """
+        with self._loop_lock:
+            if self._loop is None or self._loop.is_closed():
+                self._loop = asyncio.new_event_loop()
+            return self._loop.run_until_complete(coro)
+
+    def _close_loop(self) -> None:
+        with self._loop_lock:
+            if self._loop is not None and not self._loop.is_closed():
+                self._loop.close()
+            self._loop = None
+
     # --- 생명주기 ---------------------------------------------------
 
     def initialize(self) -> None:
@@ -99,9 +128,10 @@ class GeurimGyeolEngine:
         """열린 HTTP 연결을 닫고, 띄운 ComfyUI 가 있으면 종료한다."""
         self.stop_launched()
         try:
-            asyncio.run(self.client.close())
+            self._run(self.client.close())
         except Exception:
             pass
+        self._close_loop()
 
     # --- ComfyUI 상태 -----------------------------------------------
 
@@ -115,7 +145,7 @@ class GeurimGyeolEngine:
             allow_launch: True 면 필요할 때 ComfyUI 를 실행한다.
         """
         try:
-            self.system_info = asyncio.run(self.client.get_system_info())
+            self.system_info = self._run(self.client.get_system_info())
         except Exception as exc:
             self.system_info = SystemInfo(online=False, error=str(exc))
 
@@ -155,7 +185,7 @@ class GeurimGyeolEngine:
                     online=False, error="ComfyUI 시작 실패 (프로세스 종료)"
                 )
             try:
-                info = asyncio.run(self.client.get_system_info())
+                info = self._run(self.client.get_system_info())
             except Exception:
                 info = SystemInfo(online=False)
             if info.online:
@@ -191,7 +221,7 @@ class GeurimGyeolEngine:
         # (서버가 살아 있을 때만 — 죽었으면 연결 시도가 오래 걸린다)
         if self.system_info.online or self.online:
             try:
-                asyncio.run(self.client.post_free())
+                self._run(self.client.post_free())
             except Exception:
                 pass
 
@@ -267,7 +297,7 @@ class GeurimGyeolEngine:
         """ComfyUI 의 모델 폴더별 목록 (v0.2 §5.3)."""
         folders = ["diffusion_models", "checkpoints", "text_encoders", "vae", "loras"]
         try:
-            models = asyncio.run(self.client.get_all_models())
+            models = self._run(self.client.get_all_models())
         except Exception as exc:
             self.logger.warning("모델 목록 조회 실패: %s", exc)
             return {}
@@ -276,7 +306,7 @@ class GeurimGyeolEngine:
     def sampler_options(self) -> dict[str, list[str]]:
         """KSampler 가 받는 sampler / scheduler 목록."""
         try:
-            return asyncio.run(self.client.get_samplers())
+            return self._run(self.client.get_samplers())
         except Exception:
             return {}
 
@@ -285,7 +315,7 @@ class GeurimGyeolEngine:
     def cancel(self) -> None:
         """생성 중지를 요청한다."""
         try:
-            asyncio.run(self.client.interrupt())
+            self._run(self.client.interrupt())
         except Exception:
             pass
 
@@ -473,7 +503,7 @@ class GeurimGyeolEngine:
 
         try:
             # run_details=True 로 실제 사용된 프롬프트와 prompt_id 를 함께 받는다 (B4)
-            images, history, prompt_id = asyncio.run(
+            images, history, prompt_id = self._run(
                 self.client.run(
                     payload,
                     on_progress=_progress,
@@ -554,7 +584,7 @@ class GeurimGyeolEngine:
             blobs = []
             for item in images:
                 blobs.append(
-                    asyncio.run(
+                    self._run(
                         self.client.get_image(
                             item.get("filename", ""), item.get("subfolder", "")
                         )

@@ -35,6 +35,7 @@
 | 파일·세션 덮어쓰기(데이터 손실) | 인덱스를 파일 개수 + 1 이 아니라 **최대 번호 + 1** 로 | `test_output_session.py` |
 | VRAM 없음에서 예외 | 포맷 전 None 여부 확인(3곳) | `test_comfy_engine.py` |
 | 새로고침이 창을 2~10초 멈춤 | 상태·모델·샘플러 조회를 `ComfyInfoWorker` 스레드로 이동 | `test_non_blocking_refresh.py` |
+| 이벤트 루프가 호출마다 새로 생김 | 엔진이 루프 1개를 소유해 재사용 (15회 호출 → 루프 1개) | 실제 생성 실측 |
 | 새로고침하면 고른 모델이 리셋 | 목록을 다시 채워도 사용자의 선택을 되돌려 놓음 | `test_non_blocking_refresh.py` |
 | 미설치 모델을 조용히 다른 모델로 대체 | 이름을 그대로 두고 빨간색 표시 + 경고 + 생성 차단 | `test_model_selection.py` |
 | 세션 기록이 화면에 안 보임 | 날짜 그룹을 접던 동작 제거, 목록 1줄화 | `test_history_browser.py` |
@@ -47,18 +48,23 @@
 
 ## 3. 남은 작업
 
-### B7 — asyncio 수명 관리
+### B7 — asyncio 수명 관리 (해결)
 
-`asyncio.run` 이 `app/` 에 **12곳** 있다. 엔진은 동기 facade 라
-`ComfyClient`(비동기)를 매번 `asyncio.run` 으로 감싼다.
-`asyncio.run` 은 호출마다 이벤트 루프를 새로 만들고 닫으므로,
-`httpx.AsyncClient` 가 루프에 묶여 닫힌 루프에 재사용된다.
-현재는 `_ensure_http()` 가 이벤트 루프가 바뀌면 새 클라이언트를 만들어
-오류를 막지만, 클라이언트가 호출 횟수만큼 생성되고 이전 것은
-`aclose()` 되지 않은 채 GC 에 맡겨진다.
+`asyncio.run` 이 `comfy_engine.py` 에 **9곳** 있었다. 엔진은 동기 facade 라
+`ComfyClient`(비동기)를 매번 `asyncio.run` 으로 감쌌고, `asyncio.run` 은
+호출마다 이벤트 루프를 새로 만들어 닫는다. 그래서 호출 횟수만큼
+`httpx.AsyncClient` 가 새로 생기고 앞의 것들은 `aclose()` 되지 않은 채
+GC 에 맡겨진다.
 
-`comfy_engine.py` 를 다시 크게 건드리는 작업이라 구조 이동과 함께 하는
-편이 낫다.
+엔진이 이벤트 루프를 하나 소유하고 재사용하도록 바꿨다. GUI 스레드와
+워커 스레드가 함께 쓸 수 있어 잠금으로 직렬화한다.
+
+측정 (엔진 호출 15회):
+
+| | 수정 전 | 수정 후 |
+|---|---|---|
+| 생성된 이벤트 루프 | 15 | **1** |
+| `shutdown()` 후 닫힘 | — | 1/1 |
 
 ### 구조 이동 (아직 승인되지 않음)
 
@@ -108,3 +114,9 @@ app/gui/pages/ widgets/ controllers/ workers/
 | ComfyUI 통신이 단일 계층에 모임 | **미충족** — `app/comfy/` 에 있음 |
 | GUI 가 pages/widgets/controllers/workers 로 구분됨 | **미충족** |
 | 한 세션이 여러 이미지를 담음 | **미충족** — `GenerationResult` 에 단일 `image_path` |
+
+## 6. 이번 판에서 하지 않은 것
+
+- 구조 이동 (`app/comfy/` → `app/engine/comfy/`, `main_window.py` 분해) — 승인 대기 중
+- `outputs/` 파일명 변경 — 기존 파일과 브라우저 glob 이 엮여 있어 별도 마이그레이션이 필요
+- `ModelInfoPanel` 글자 겹침 — 시각 확인 필요
