@@ -1,0 +1,7 @@
+{
+  "default": {"prompt_style": "sentence", "use_negative": true},
+  "sd15": {"prompt_style": "tag", "use_negative": true},
+  "sd21": {"prompt_style": "tag", "use_negative": true},
+  "sdxl": {"prompt_style": "sentence", "use_negative": true},
+  "flux": {"prompt_style": "sentence", "use_negative": false}
+}

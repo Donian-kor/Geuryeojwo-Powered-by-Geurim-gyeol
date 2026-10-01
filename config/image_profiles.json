@@ -1,0 +1,6 @@
+{
+  "sd15": {"kind":"image", "architecture":"sd15", "prompt_style":"tag", "use_negative":true, "loader":"stable_diffusion_single_file"},
+  "sd21": {"kind":"image", "architecture":"sd21", "prompt_style":"tag", "use_negative":true, "loader":"stable_diffusion_single_file"},
+  "sdxl": {"kind":"image", "architecture":"sdxl", "prompt_style":"sentence", "use_negative":true, "loader":"stable_diffusion_single_file"},
+  "flux": {"kind":"image", "architecture":"flux", "prompt_style":"sentence", "use_negative":false, "loader":"diffusers_directory"}
+}

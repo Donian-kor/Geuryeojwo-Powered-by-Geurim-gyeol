@@ -1,5 +1,10 @@
-# Runtime dependencies for ComfyUI + LM Studio GUI
-requests>=2.31.0,<3.0
-websocket-client>=1.8.0,<2.0
-PySide6>=6.6.0,<7.0
-markdown>=3.5.0,<4.0
+PySide6>=6.6,<7
+Pillow>=10,<13
+torch>=2.2
+transformers>=4.40
+accelerate>=0.28
+diffusers>=0.30
+safetensors>=0.4
+sentencepiece>=0.2
+# GGUF local LLM runtime. On some platforms this may build from source.
+llama-cpp-python>=0.3

@@ -1,0 +1,6 @@
+{
+  "application": {"name":"Geuryeojwo", "version":"0.1.0", "engine":"Geurim-gyeol"},
+  "generation": {"width":1024,"height":1024,"steps":20,"cfg":7.0,"seed":-1},
+  "paths": {"llm":"models/llm","checkpoints":"models/checkpoints","vae":"models/vae","lora":"models/lora","outputs":"outputs"},
+  "memory": {"sequential_model_loading":true,"empty_cuda_cache":true}
+}
