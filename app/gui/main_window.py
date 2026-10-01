@@ -41,6 +41,30 @@ class Worker(QThread):
         except Exception as e: self.failed.emit(str(e), None)
 
 
+class ComfyInfoWorker(QThread):
+    """ComfyUI 상태·모델·샘플러 목록을 백그라운드에서 가져온다.
+
+    이 호출들은 전부 네트워크 I/O 다. GUI 스레드에서 직접 부르면 창이
+    그만큼 멈춘다 (ComfyUI 가 꺼져 있으면 연결 실패로 수 초,
+    자동 실행 대기라면 launch_wait_seconds 만큼).
+
+    세 가지를 한 번에 모아 emit 하므로 요청이 늘어나지 않는다.
+    """
+
+    fetched = Signal(object, object, object)  # SystemInfo, models, samplers
+
+    def __init__(self, engine, allow_launch: bool = True):
+        super().__init__()
+        self.engine = engine
+        self.allow_launch = allow_launch
+
+    def run(self) -> None:
+        info = self.engine.refresh_status(allow_launch=self.allow_launch)
+        models = self.engine.model_options()
+        samplers = self.engine.sampler_options()
+        self.fetched.emit(info, models, samplers)
+
+
 class ModelInfoPanel(QGroupBox):
     """선택한 워크플로와 ComfyUI 상태 요약 (v0.2 §11).
 
@@ -123,7 +147,14 @@ class MainWindow(QWidget):
         # 최소 높이는 실측값이다. 700 미만이면 Generate 탭의 Prompt 프레임과
         # spinbox 가 잘린다 (탭 영역 = 창 높이 - 약 96px, 필요 높이 약 604px).
         self.setMinimumSize(900, 700)
-        self.engine=GeurimGyeolEngine(ROOT); self.engine.initialize(); self.worker=None
+        self.engine=GeurimGyeolEngine(ROOT); self.worker=None
+        # 창이 닫힌 뒤 도착한 워커 시그널은 버린다
+        self._closing=False
+        # ComfyUI 조회는 네트워크 I/O 라 GUI 스레드에서 하지 않는다.
+        # 워크플로 목록만(디스크) 먼저 읽고, 서버 조회는 워커로 넘긴다.
+        self.engine.refresh_workflows()
+        self._info_worker=None
+        self._comfy_models={}; self._comfy_samplers={}
         self.theme_manager=ThemeManager(QApplication.instance(), ROOT / "config" / "theme_config.json"); self.theme_manager.apply_theme()
         self.build_ui(); self.refresh_models()
 
@@ -159,23 +190,13 @@ class MainWindow(QWidget):
         top.addWidget(self.status_refresh); top.addWidget(self.theme_toggle)
         root.addLayout(top)
 
-        # ComfyUI 오프라인 안내 (자동 실행 켜져 있으면 다른 문구를 쓴다)
-        if not self.engine.online:
-            if self.engine.config.auto_launch:
-                warn_text = (
-                    "⚠ ComfyUI 에 접속할 수 없어 자동으로 실행을 시도했습니다. "
-                    f"사유: {self.engine.system_info.error or '알 수 없음'}\n"
-                    "'상태 새로고침'을 누르면 다시 시도합니다."
-                )
-            else:
-                warn_text = (
-                    "⚠ ComfyUI 서버에 접속할 수 없습니다. "
-                    "ComfyUI를 실행한 뒤 '상태 새로고침'을 눌러주세요.\n"
-                    "config/comfyui.json 의 auto_launch 를 켜면 자동으로 실행합니다."
-                )
-            warn=QLabel(warn_text)
-            warn.setWordWrap(True); warn.setStyleSheet("color:#ffd93d; font-size:12px;")
-            root.addWidget(warn)
+        # ComfyUI 오프라인 안내 — 서버 조회가 끝난 뒤(_on_info_fetched)
+        # 표시 여부가 정해지므로, 처음엔 숨겨 두었다 켠다.
+        self.status_banner=QLabel("")
+        self.status_banner.setWordWrap(True)
+        self.status_banner.setStyleSheet("color:#ffd93d; font-size:12px;")
+        self.status_banner.setVisible(False)
+        root.addWidget(self.status_banner)
 
         tabs=QTabWidget(); root.addWidget(tabs, 1)
         # Model 탭을 먼저 만든다. _on_workflow_changed() 가 self.model_info 를
@@ -440,26 +461,59 @@ class MainWindow(QWidget):
     def refresh_models(self):
         """ComfyUI 상태와 workflows/ 목록을 갱신한다.
 
-        ComfyUI 가 꺼져 있고 자동 실행이 켜져 있으면, 실행에 시간이
-        걸리므로 먼저 버튼을 비활성화하고 대기 안내를 띄운다.
+        서버 조회는 네트워크 I/O 라 GUI 스레드에서 하지 않는다.
+        여기서는 목록(디스크)만 갱신하고, 상태·모델·샘플러는
+        ComfyInfoWorker 가 백그라운드에서 가져온 뒤 적용한다.
         """
-        auto = self.engine.config.auto_launch
-        offline = not self.engine.online
+        if self._info_worker is not None and self._info_worker.isRunning():
+            return  # 이미 조회 중이면 중복 요청하지 않는다
 
-        if auto and offline:
-            self.status_refresh.setEnabled(False)
-            self.status.setText("ComfyUI 를 실행하는 중입니다. 잠시만 기다려주세요...")
+        self.comfy_label.setText("ComfyUI 확인 중...")
+        self.status_refresh.setEnabled(False)
+        self._reload_workflows()
+        self._info_worker=ComfyInfoWorker(
+            self.engine, allow_launch=self.engine.config.auto_launch
+        )
+        self._info_worker.fetched.connect(self._on_info_fetched)
+        self._info_worker.start()
 
-        try:
-            self.engine.refresh_status()
-        finally:
-            self.status_refresh.setEnabled(True)
+    def _on_info_fetched(self, info, models, samplers) -> None:
+        """ComfyUI 조회가 끝난 뒤(GUI 스레드) 위젯에 반영한다."""
+        if self._closing: return
+        self.engine.system_info = info
+        self._comfy_models = models or {}
+        self._comfy_samplers = samplers or {}
 
         self.comfy_label.setText(self.engine.status_text())
         self.comfy_label.setStyleSheet(
             "color:#7fb3ff;" if self.engine.online else "color:#d9534f;"
         )
-        self._reload_workflows()
+        self.status_refresh.setEnabled(True)
+        self._update_offline_banner()
+        self._update_status_bar()
+        # 새 목록으로 콤보를 다시 채운다 (사용자가 고른 값은 유지된다)
+        if self.engine.active_workflow is not None:
+            self._on_workflow_changed(preserve_selection=True)
+
+    def _update_offline_banner(self) -> None:
+        """ComfyUI 접속 안내 문구를 갱신한다."""
+        if self.engine.online:
+            self.status_banner.setVisible(False)
+            return
+        if self.engine.config.auto_launch:
+            text = (
+                "⚠ ComfyUI 에 접속할 수 없어 자동으로 실행을 시도했습니다. "
+                f"사유: {self.engine.system_info.error or '알 수 없음'}\n"
+                "'상태 새로고침'을 누르면 다시 시도합니다."
+            )
+        else:
+            text = (
+                "⚠ ComfyUI 서버에 접속할 수 없습니다. "
+                "ComfyUI를 실행한 뒤 '상태 새로고침'을 눌러주세요.\n"
+                "config/comfyui.json 의 auto_launch 를 켜면 자동으로 실행합니다."
+            )
+        self.status_banner.setText(text)
+        self.status_banner.setVisible(True)
 
     def _reload_workflows(self):
         """workflows/ 폴더를 다시 읽어 드롭다운을 채운다."""
@@ -473,10 +527,17 @@ class MainWindow(QWidget):
                 if self.workflow.itemData(i) == self.engine.active_workflow.path.stem:
                     self.workflow.setCurrentIndex(i)
                     break
-        self._on_workflow_changed()
+        # 워크플로를 다시 읽는 것은 목록 갱신이지 워크플로 변경이 아니므로
+        # 사용자가 고른 모델/샘플러를 유지한다.
+        # (백그라운드 조회가 끝난 뒤 다시 채울 때도 같은 값을 되돌려 둔다)
+        self._on_workflow_changed(preserve_selection=True)
 
-    def _on_workflow_changed(self):
-        """워크플로 선택을 엔진에 반영하고 입력 가능 여부를 갱신한다."""
+    def _on_workflow_changed(self, preserve_selection: bool = False):
+        """워크플로 선택을 엔진에 반영하고 입력 가능 여부를 갱신한다.
+
+        preserve_selection=True 이면 새로고침으로 사용자가 고른
+        모델/샘플러가 워크플로 기본값으로 되돌아가지 않게 유지한다.
+        """
         name = self.workflow.currentData()
         if name is not None:
             self.engine.select_workflow(name)
@@ -505,8 +566,8 @@ class MainWindow(QWidget):
             self.steps.setValue(defaults["steps"])
         if "cfg" in params and isinstance(defaults.get("cfg"), (int, float)):
             self.cfg.setValue(float(defaults["cfg"]))
-        self._setup_sampler(params, defaults)
-        self._setup_models(params, defaults)
+        self._setup_sampler(params, defaults, preserve_selection)
+        self._setup_models(params, defaults, preserve_selection)
         self._setup_lora_strength(params, defaults)
         self._setup_enhancer(params, defaults)
         self.status.setText(
@@ -536,9 +597,29 @@ class MainWindow(QWidget):
         넣고 빨간색으로 표시한다. 대체해 버리면 사용자도 모르는 채
         잘못된 모델로 생성된다.
         """
-        options = self.engine.model_options()
+    def _setup_models(self, params: dict, defaults: dict,
+                      preserve_selection: bool = False) -> None:
+        """모델 선택 드롭다운을 워크플로에 맞춘다.
+
+        워크플로에 없는 모델 종류는 비활성화한다.
+        ComfyUI 목록은 백그라운드 워커가 받아 온 캐시(self._comfy_models)를
+        쓴다 — 여기서 직접 조회하면 GUI 스레드가 네트워크 만큼 멈춘다.
+
+        워크플로가 지정한 모델이 ComfyUI 목록에 없으면 목록의
+        다른 파일로 대체하지 않는다. 목록에 없는 이름을 그대로
+        넣고 빨간색으로 표시한다. 대체해 버리면 사용자도 모르는 채
+        잘못된 모델로 생성된다.
+
+        preserve_selection=True 이면 사용자가 고른 값이 목록에 그대로
+        있을 때 되돌려 놓는다 (새로고침해도 선택이 사라지지 않는다).
+        """
+        options = self._comfy_models
         # ComfyUI 목록을 저장해 두어야 "설치 안 됨"을 다시 판정할 수 있다
         self._model_options = options
+        chosen = (
+            {key: combo.currentText() for key, combo in self.model_combos.items()}
+            if preserve_selection else {}
+        )
         for key, combo in self.model_combos.items():
             combo.blockSignals(True)
             combo.clear()
@@ -564,6 +645,12 @@ class MainWindow(QWidget):
                 combo.insertItem(0, str(current))
             if current:
                 index = combo.findText(str(current))
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+            # 사용자가 직접 고른 값이 여전히 유효하면 유지한다
+            keep = chosen.get(key)
+            if keep:
+                index = combo.findText(keep)
                 if index >= 0:
                     combo.setCurrentIndex(index)
             combo.blockSignals(False)
@@ -655,7 +742,8 @@ class MainWindow(QWidget):
         if isinstance(value, (int, float)):
             self.lora_strength.setValue(int(round(float(value) * 100)))
 
-    def _setup_sampler(self, params: dict, defaults: dict) -> None:
+    def _setup_sampler(self, params: dict, defaults: dict,
+                       preserve_selection: bool = False) -> None:
         """Sampler / Scheduler 드롭다운을 워크플로에 맞춘다.
 
         파라미터 키 이름은 워크플로마다 다르다
@@ -672,13 +760,18 @@ class MainWindow(QWidget):
         scheduler_key = by_input.get("scheduler")
 
         if sampler_key or scheduler_key:
-            options = self.engine.sampler_options()
+            # 목록은 백그라운드 워커가 받아 온 캐시를 쓴다
+            options = self._comfy_samplers
         else:
             options = {}
 
-        for combo, key, option_key in (
-            (self.sampler, sampler_key, "sampler"),
-            (self.scheduler, scheduler_key, "scheduler"),
+        # 새로고침이어도 사용자가 고른 샘플러를 되돌려 놓는다
+        keep_sampler = self.sampler.currentText() if preserve_selection else ""
+        keep_scheduler = self.scheduler.currentText() if preserve_selection else ""
+
+        for combo, key, option_key, keep in (
+            (self.sampler, sampler_key, "sampler", keep_sampler),
+            (self.scheduler, scheduler_key, "scheduler", keep_scheduler),
         ):
             combo.blockSignals(True)
             combo.clear()
@@ -699,6 +792,11 @@ class MainWindow(QWidget):
 
             if current:
                 index = combo.findText(str(current))
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+            # 사용자가 직접 고른 값이 여전히 있으면 유지한다
+            if keep:
+                index = combo.findText(keep)
                 if index >= 0:
                     combo.setCurrentIndex(index)
             combo.blockSignals(False)
@@ -802,6 +900,7 @@ class MainWindow(QWidget):
         self.status.setText("중지 요청됨")
 
     def done(self,path,meta):
+        if self._closing: return
         self.generate.setEnabled(True)
         pixmap=QPixmap(path)
         if not pixmap.isNull():
@@ -818,13 +917,21 @@ class MainWindow(QWidget):
         VRAM 관리는 ComfyUI 가 하고, 이 프로그램은 파라미터만 넘기기
         때문이다. 오류 원인은 워크플로/노드/모델 쪽에 있으므로 로그로 남긴다.
         """
+        if self._closing: return
         self.generate.setEnabled(True)
         self.status.setText("실패")
         self.log.append("ERROR: " + msg)
         QMessageBox.critical(self, "생성 실패", msg)
 
     def closeEvent(self, event):
+        # 닫은 뒤 도착하는 워커 시그널은 무시한다.
+        # (대화상자가 닫힌 창에 뜨거나, 죽은 위젯에 손대게 된다)
+        self._closing = True
         self._mem_timer.stop()
+        # 진행 중인 조회가 창이 닫힌 뒤 시그널이 날아와 크래시가 난다
+        if self._info_worker is not None and self._info_worker.isRunning():
+            self._info_worker.fetched.disconnect(self._on_info_fetched)
+            self._info_worker.wait(3000)
         self.engine.shutdown()
         super().closeEvent(event)
 

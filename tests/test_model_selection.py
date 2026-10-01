@@ -111,6 +111,12 @@ def make_window(qapp, tmp_path, monkeypatch, project_root):
 
         window = mw.MainWindow()
         qapp.processEvents()
+        # 서버 조회는 백그라운드 워커가 하므로, 끝날 때까지 기다려
+        # 위젯에 반영시킨 뒤 돌려준다 (그대로 두면 목록이 비어 있다)
+        if window._info_worker is not None:
+            window._info_worker.wait(5000)
+        for _ in range(5):
+            qapp.processEvents()
         return window
 
     return _build
