@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>그려줘 v0.1 - Output Browser & Session History Mockup</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #eee;
+            min-height: 100vh;
+        }
+        .window {
+            width: 1400px;
+            height: 900px;
+            background: #0f0f23;
+            border: 1px solid #3a3a5a;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+            overflow: hidden;
+            margin: 40px auto;
+        }
+        .title-bar {
+            background: linear-gradient(90deg, #2d2d44 0%, #1e1e3a 100%);
+            padding: 12px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #3a3a5a;
+        }
+        .title-bar h1 {
+            font-size: 22px;
+            font-weight: 600;
+            color: #fff;
+        }
+        .title-bar .subtitle {
+            font-size: 13px;
+            color: #a0a0c0;
+        }
+        .tabs {
+            display: flex;
+            background: #141424;
+            border-bottom: 1px solid #3a3a5a;
+        }
+        .tab {
+            padding: 14px 24px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            color: #a0a0c0;
+            transition: all 0.2s;
+            border-right: 1px solid #3a3a5a;
+        }
+        .tab:hover { background: #2a2a4a; }
+        .tab.active {
+            background: #2d2d44;
+            color: #fff;
+            border-bottom: 2px solid #4d9eff;
+        }
+        .content {
+            display: flex;
+            padding: 20px;
+            gap: 20px;
+        }
+        .card {
+            background: #1e1e3a;
+            border-radius: 10px;
+            padding: 16px;
+            border: 1px solid #3a3a5a;
+        }
+        .card h3 {
+            font-size: 14px;
+            color: #8a8abf;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .card h3::before {
+            content: '';
+            width: 8px;
+            height: 8px;
+            background: #4d9eff;
+            border-radius: 50%;
+        }
+        .toolbar {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+        .btn {
+            padding: 6px 12px;
+            border-radius: 6px;
+            border: none;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        .btn.primary {
+            background: #4d9eff;
+            color: #141424;
+        }
+        .btn.primary:hover { background: #6bb3ff; }
+        .btn.secondary {
+            background: #2a2a4a;
+            color: #e0e0e0;
+            border: 1px solid #3a3a5a;
+        }
+        .btn.secondary:hover { background: #3a3a5a; }
+        .btn.danger {
+            background: #ef5350;
+            color: #fff;
+        }
+        .btn.danger:hover { background: #ff7a65; }
+        .split-container {
+            display: flex;
+            gap: 16px;
+            flex: 1;
+        }
+        .left-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+        .right-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+        .tree-container {
+            background: #1e1e3a;
+            border-radius: 10px;
+            padding: 16px;
+            border: 1px solid #3a3a5a;
+            flex: 1;
+            min-height: 400px;
+        }
+        .tree-item {
+            padding: 8px 12px;
+            border-radius: 4px;
+            margin-bottom: 4px;
+            cursor: pointer;
+            font-size: 13px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .tree-item:hover { background: #2a2a4a; }
+        .tree-item.selected { background: #3a3a5a; }
+        .tree-item.date {
+            font-weight: 600;
+            color: #4d9eff;
+            border-bottom: 1px solid #3a3a5a;
+            margin-bottom: 8px;
+        }
+        .tree-item .col {
+            flex: 1;
+        }
+        .tree-item .col:first-child { flex: 2; }
+        .tree-item .col:last-child { flex: 1; text-align: right; color: #8a8abf; font-size: 12px; }
+        .tree-item .icon {
+            width: 24px;
+            height: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .preview-section {
+            background: #1e1e3a;
+            border-radius: 10px;
+            padding: 16px;
+            border: 1px solid #3a3a5a;
+        }
+        .preview-section .label {
+            font-size: 13px;
+            color: #8a8abf;
+            margin-bottom: 8px;
+        }
+        .preview-section .value {
+            font-size: 14px;
+            color: #fff;
+            padding: 8px;
+            background: #141424;
+            border-radius: 6px;
+        }
+        .preview-section .content {
+            background: #141424;
+            padding: 12px;
+            border-radius: 6px;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            line-height: 1.5;
+            color: #e0e0e0;
+            white-space: pre-wrap;
+            min-height: 80px;
+        }
+        .image-preview {
+            width: 100%;
+            height: 300px;
+            background: #141424;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #8a8abf;
+            font-size: 14px;
+            margin-bottom: 12px;
+            border: 1px solid #3a3a5a;
+        }
+        .meta-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 8px;
+        }
+        .meta-item {
+            background: #141424;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 13px;
+        }
+        .meta-item .key { color: #8a8abf; }
+        .meta-item .value { color: #fff; }
+        .form-row {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+        .form-row label {
+            width: 100px;
+            font-size: 13px;
+            color: #a0a0c0;
+        }
+        .form-row input, .form-row select, .form-row textarea {
+            flex: 1;
+            padding: 8px 12px;
+            border-radius: 6px;
+            border: 1px solid #3a3a5a;
+            background: #141424;
+            color: #e0e0e0;
+            font-size: 14px;
+        }
+        .form-row textarea {
+            min-height: 80px;
+            resize: vertical;
+        }
+        .status-bar {
+            background: #141424;
+            padding: 8px 20px;
+            font-size: 13px;
+            color: #8a8abf;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-top: 1px solid #3a3a5a;
+        }
+        .progress-bar {
+            width: 200px;
+            height: 4px;
+            background: #2a2a4a;
+            border-radius: 2px;
+            overflow: hidden;
+        }
+        .progress-bar .fill {
+            height: 100%;
+            background: #4d9eff;
+            width: 30%;
+        }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+    </style>
+</head>
+<body>
+    <div class="window">
+        <div class="title-bar">
+            <div>
+                <h1>그려줘 v0.1</h1>
+                <div class="subtitle">Local AI Image Studio · Powered by Geurim-gyeol</div>
+            </div>
+        </div>
+
+        <div class="tabs">
+            <div class="tab" onclick="showTab('preview')">Prompt Preview</div>
+            <div class="tab" onclick="showTab('generate')">Generate</div>
+            <div class="tab active" onclick="showTab('output')">Output Browser</div>
+            <div class="tab" onclick="showTab('session')">Session History</div>
+        </div>
+
+        <!-- Output Browser Tab -->
+        <div class="content tab-content active" id="outputTab">
+            <div class="left-panel">
+                <div class="card">
+                    <h3>Output Browser</h3>
+                    <div class="toolbar">
+                        <button class="btn secondary">새로고침</button>
+                        <button class="btn secondary">폴더 열기</button>
+                        <button class="btn danger">삭제</button>
+                        <button class="btn secondary">다른 이름으로 저장</button>
+                        <button class="btn primary">재생성</button>
+                        <button class="btn secondary">Prompt 복사</button>
+                    </div>
+                    <div class="tree-container">
+                        <div class="tree-item date">
+                            <span class="icon">📁</span>
+                            <span class="col">2026-10-01</span>
+                            <span class="col">3 images</span>
+                        </div>
+                        <div class="tree-item selected">
+                            <span class="icon">🖼️</span>
+                            <span class="col">img_001_seed123456.png</span>
+                            <span class="col">Seed: 123456</span>
+                        </div>
+                        <div class="tree-item">
+                            <span class="icon">🖼️</span>
+                            <span class="col">img_002_seed789012.png</span>
+                            <span class="col">Seed: 789012</span>
+                        </div>
+                        <div class="tree-item">
+                            <span class="icon">🖼️</span>
+                            <span class="col">img_003_seed345678.png</span>
+                            <span class="col">Seed: 345678</span>
+                        </div>
+                        <div class="tree-item date">
+                            <span class="icon">📁</span>
+                            <span class="col">2026-09-30</span>
+                            <span class="col">2 images</span>
+                        </div>
+                        <div class="tree-item">
+                            <span class="icon">🖼️</span>
+                            <span class="col">img_001_seed999999.png</span>
+                            <span class="col">Seed: 999999</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="right-panel">
+                <div class="preview-section">
+                    <div class="label">이미지 미리보기</div>
+                    <div class="image-preview">
+                        [선택된 이미지 미리보기]
+                    </div>
+                </div>
+                <div class="preview-section">
+                    <div class="label">메타데이터</div>
+                    <div class="meta-grid">
+                        <div class="meta-item"><span class="key">Seed:</span> <span class="value">123456</span></div>
+                        <div class="meta-item"><span class="key">Model:</span> <span class="value">SDXL 1.0 Base</span></div>
+                        <div class="meta-item"><span class="key">Size:</span> <span class="value">1024 × 1024</span></div>
+                        <div class="meta-item"><span class="key">Steps:</span> <span class="value">30</span></div>
+                        <div class="meta-item"><span class="key">CFG:</span> <span class="value">7.0</span></div>
+                        <div class="meta-item"><span class="key">Sampler:</span> <span class="value">DPM++ 2M Karras</span></div>
+                        <div class="meta-item"><span class="key">Created:</span> <span class="value">2026-10-01 14:30:25</span></div>
+                    </div>
+                </div>
+                <div class="preview-section">
+                    <div class="label">Prompt</div>
+                    <div class="content">
+A young girl walks through a rainy Tokyo alley at night, neon signs reflecting on wet pavement, cinematic lighting, moody atmosphere, detailed urban scenery, rain droplets on windows, vibrant colors, 8K resolution, ultra-detailed, sharp focus
+                    </div>
+                </div>
+                <div class="preview-section">
+                    <div class="label">Negative Prompt</div>
+                    <div class="content">
+worst quality, low quality, blurry, grainy, lowres, mutated hands, poorly drawn hands, extra fingers, deformed iris
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Session History Tab -->
+        <div class="content tab-content" id="sessionTab">
+            <div class="left-panel">
+                <div class="card">
+                    <h3>Session History</h3>
+                    <div class="toolbar">
+                        <button class="btn secondary">새로고침</button>
+                        <button class="btn danger">세션 삭제</button>
+                        <button class="btn secondary">Prompt 복사</button>
+                        <button class="btn primary">재생성</button>
+                    </div>
+                    <div class="tree-container">
+                        <div class="tree-item date">
+                            <span class="icon">📁</span>
+                            <span class="col">2026-10-01</span>
+                            <span class="col">2 sessions</span>
+                        </div>
+                        <div class="tree-item selected">
+                            <span class="icon">💬</span>
+                            <span class="col">143025-1</span>
+                            <span class="col">3 images</span>
+                        </div>
+                        <div class="tree-item">
+                            <span class="icon">💬</span>
+                            <span class="col">143512-2</span>
+                            <span class="col">1 image</span>
+                        </div>
+                        <div class="tree-item date">
+                            <span class="icon">📁</span>
+                            <span class="col">2026-09-30</span>
+                            <span class="col">1 session</span>
+                        </div>
+                        <div class="tree-item">
+                            <span class="icon">💬</span>
+                            <span class="col">102030-1</span>
+                            <span class="col">2 images</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="right-panel">
+                <div class="card">
+                    <h3>Session 메타데이터</h3>
+                    <div class="form-row">
+                        <label>원본 프롬프트:</label>
+                        <input type="text" value="비 오는 날 도쿄의 골목을 걷는 소녀" readonly>
+                    </div>
+                    <div class="form-row">
+                        <label>강화 프롬프트:</label>
+                        <textarea readonly>A young girl walks through a rainy Tokyo alley at night, neon signs reflecting on wet pavement, cinematic lighting, moody atmosphere, detailed urban scenery, rain droplets on windows, vibrant colors, 8K resolution, ultra-detailed, sharp focus</textarea>
+                    </div>
+                    <div class="form-row">
+                        <label>Negative:</label>
+                        <textarea readonly>worst quality, low quality, blurry, grainy, lowres, mutated hands, poorly drawn hands, extra fingers, deformed iris</textarea>
+                    </div>
+                    <div class="form-row">
+                        <label>파라미터:</label>
+                        <input type="text" value="LLM: Qwen 2.5 7B | Image: SDXL | Seed: 123456 | 1024x1024 | Steps: 30 | CFG: 7.0 | Sampler: DPM++ 2M Karras | Generated: 2026-10-01 14:30:25" readonly>
+                    </div>
+                </div>
+                <div class="card">
+                    <h3>이미지 목록</h3>
+                    <div class="tree-container" style="min-height: 200px;">
+                        <div class="tree-item selected">
+                            <span class="icon">🖼️</span>
+                            <span class="col">img_001_seed123456.png</span>
+                            <span class="col">Seed: 123456</span>
+                        </div>
+                        <div class="tree-item">
+                            <span class="icon">🖼️</span>
+                            <span class="col">img_002_seed789012.png</span>
+                            <span class="col">Seed: 789012</span>
+                        </div>
+                        <div class="tree-item">
+                            <span class="icon">🖼️</span>
+                            <span class="col">img_003_seed345678.png</span>
+                            <span class="col">Seed: 345678</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="preview-section">
+                    <div class="label">이미지 미리보기 (더블클릭)</div>
+                    <div class="image-preview">
+                        [선택된 이미지 미리보기]
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Prompt Preview Tab -->
+        <div class="content tab-content" id="previewTab">
+            <div class="left-panel">
+                <div class="card">
+                    <h3>Prompt Preview</h3>
+                    <div class="form-row">
+                        <label>Target Model:</label>
+                        <select>
+                            <option>SDXL</option>
+                            <option>SD 1.5</option>
+                            <option>Flux</option>
+                        </select>
+                    </div>
+                    <div class="form-row">
+                        <label>Prompt Style:</label>
+                        <input type="text" value="Natural / Tag 혼합" readonly>
+                    </div>
+                    <div class="form-row">
+                        <label>Original Prompt:</label>
+                        <textarea>비 오는 날 도쿄의 골목을 걷는 소녀</textarea>
+                    </div>
+                    <div class="form-row">
+                        <label>Enhanced Prompt:</label>
+                        <textarea>A young girl walks through a rainy Tokyo alley at night, neon signs reflecting on wet pavement, cinematic lighting, moody atmosphere, detailed urban scenery, rain droplets on windows, vibrant colors, 8K resolution, ultra-detailed, sharp focus</textarea>
+                    </div>
+                    <div class="form-row">
+                        <label>Negative Prompt:</label>
+                        <textarea readonly>worst quality, low quality, blurry, grainy, lowres, mutated hands, poorly drawn hands, extra fingers, deformed iris</textarea>
+                    </div>
+                    <div class="btn-row">
+                        <button class="btn primary">프롬프트 강화 (Auto Generate)</button>
+                        <button class="btn secondary">생성 (Generate)</button>
+                    </div>
+                </div>
+            </div>
+            <div class="right-panel">
+                <div class="card">
+                    <h3>Generation Parameters</h3>
+                    <div class="form-row">
+                        <label>Width:</label>
+                        <input type="number" value="1024">
+                    </div>
+                    <div class="form-row">
+                        <label>Height:</label>
+                        <input type="number" value="1024">
+                    </div>
+                    <div class="form-row">
+                        <label>Steps:</label>
+                        <input type="number" value="30">
+                    </div>
+                    <div class="form-row">
+                        <label>CFG:</label>
+                        <input type="number" value="7.0" step="0.1">
+                    </div>
+                    <div class="form-row">
+                        <label>Seed:</label>
+                        <input type="number" value="-1">
+                    </div>
+                    <div class="form-row">
+                        <label>LLM:</label>
+                        <select>
+                            <option>Qwen 2.5 7B Q4_K_M.gguf</option>
+                            <option>Mistral 7B Instruct Q4_K_M.gguf</option>
+                            <option>사용 안 함 (fallback)</option>
+                        </select>
+                    </div>
+                    <div class="form-row">
+                        <label>Image Model:</label>
+                        <select>
+                            <option>SDXL 1.0 Base</option>
+                            <option>Flux Schnell</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Generate Tab -->
+        <div class="content tab-content" id="generateTab">
+            <div class="left-panel">
+                <div class="chat-container" id="chatContainer">
+                    <div class="chat-message user">
+                        <div class="avatar">나</div>
+                        <div class="bubble">비 오는 날 도쿄의 골목을 걷는 소녀</div>
+                    </div>
+                    <div class="chat-message ai">
+                        <div class="avatar">AI</div>
+                        <div class="bubble">
+                            <div class="prompt-card">
+                                <div class="title">✨ AI가 다듬은 프롬프트</div>
+                                <div class="content">A young girl walks through a rainy Tokyo alley at night, neon signs reflecting on wet pavement, cinematic lighting, moody atmosphere, detailed urban scenery, rain droplets on windows, vibrant colors, 8K resolution, ultra-detailed, sharp focus</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="generation-card">
+                        <div class="status">이미지 생성 중... (45%)</div>
+                        <div class="progress"><div class="fill"></div></div>
+                        <button class="btn danger">■ 취소</button>
+                    </div>
+                    <div class="image-card">
+                        <div class="image">[이미지 미리보기]</div>
+                        <div class="meta"><strong>Seed:</strong> 123456789<br><strong>Model:</strong> SDXL<br><strong>Size:</strong> 1024x1024<br><strong>Steps:</strong> 30 | CFG: 7.0<br><strong>Created:</strong> 2026-10-01 14:30:25</div>
+                    </div>
+                </div>
+            </div>
+            <div class="right-panel">
+                <div class="card">
+                    <h3>Generation Parameters</h3>
+                    <div class="form-row"><label>Width:</label><input type="number" value="1024"></div>
+                    <div class="form-row"><label>Height:</label><input type="number" value="1024"></div>
+                    <div class="form-row"><label>Steps:</label><input type="number" value="30"></div>
+                    <div class="form-row"><label>CFG:</label><input type="number" value="7.0" step="0.1"></div>
+                    <div class="form-row"><label>Seed:</label><input type="number" value="-1"></div>
+                    <div class="form-row"><label>Negative:</label><textarea>- worst quality, low quality...</textarea></div>
+                    <div class="btn-row"><button class="btn primary">그려줘</button><button class="btn secondary">중지</button></div>
+                </div>
+                <div class="card">
+                    <h3>Models</h3>
+                    <div class="form-row"><label>LLM:</label><select><option>Qwen 2.5 7B Q4_K_M.gguf</option><option>Mistral 7B Instruct Q4_K_M.gguf</option><option>사용 안 함 (fallback)</option></select></div>
+                    <div class="form-row"><label>Image:</label><select><option>SDXL 1.0 Base</option><option>Flux Schnell</option></select></div>
+                    <div class="btn-row"><button class="btn secondary">모델 새로고침</button></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="status-bar">
+            <span>준비됨</span>
+            <div class="progress-bar"><div class="fill"></div></div>
+            <span>00:00 / 00:00</span>
+        </div>
+    </div>
+
+    <script>
+        function showTab(tabName) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+            event.target.classList.add('active');
+            document.getElementById(tabName + 'Tab').classList.add('active');
+        }
+    </script>
+</body>
+</html>

@@ -1,7 +1,7 @@
 from __future__ import annotations
 import sys, logging
 from pathlib import Path
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit,
@@ -39,13 +39,37 @@ class MainWindow(QWidget):
         root=QVBoxLayout(self)
         title=QLabel("그려줘 v0.1"); title.setStyleSheet("font-size:28px;font-weight:700"); root.addWidget(title)
         sub=QLabel("Local AI Image Studio  ·  Powered by Geurim-gyeol"); root.addWidget(sub)
-        hw=QLabel(f"Hardware: {self.engine.hardware.backend} / {self.engine.hardware.name} / {self.engine.hardware.dtype}"); root.addWidget(hw)
+        
+        hw_box=QGroupBox("System Information"); hw_layout=QFormLayout(hw_box)
+        self.hw_label=QLabel(f"Backend: {self.engine.hardware.backend}"); hw_layout.addRow("Backend:",self.hw_label)
+        self.hw_name=QLabel(f"Device: {self.engine.hardware.name}"); hw_layout.addRow("Device:",self.hw_name)
+        self.hw_dtype=QLabel(f"Precision: {self.engine.hardware.dtype}"); hw_layout.addRow("Precision:",self.hw_dtype)
+        self.hw_vram=QLabel(f"VRAM: {f'{self.engine.hardware.vram_gb:.1f} GB' if self.engine.hardware.vram_gb else 'N/A'}"); hw_layout.addRow("VRAM:",self.hw_vram)
+        self.llm_count=QLabel(f"LLM: {len(self.engine.registry.scan_llm())} found"); hw_layout.addRow("Models:",self.llm_count)
+        self.image_count=QLabel(f"Image: {len(self.engine.registry.scan_image())} found"); hw_layout.addRow("",self.image_count)
+        root.addWidget(hw_box)
+        
+        btns=QHBoxLayout()
+        self.theme_toggle=QPushButton("다크/라이트 전환"); self.theme_toggle.clicked.connect(self._toggle_theme)
+        self.dry_run_btn=QPushButton("환경 검사 (Dry Run)"); self.dry_run_btn.clicked.connect(self._run_dry_run)
+        btns.addWidget(self.theme_toggle); btns.addWidget(self.dry_run_btn); btns.addStretch()
+        root.addLayout(btns)
 
         tabs=QTabWidget(); root.addWidget(tabs)
         tabs.addTab(self._build_preview_tab(), "Prompt Preview")
         tabs.addTab(self._build_generate_tab(), "Generate")
         tabs.addTab(self._build_output_tab(), "Output Browser")
         tabs.addTab(self._build_session_tab(), "Session History")
+
+        status_bar=QHBoxLayout()
+        self.status_ram=QLabel("RAM: -"); status_bar.addWidget(self.status_ram)
+        self.status_vram=QLabel("VRAM: -"); status_bar.addWidget(self.status_vram)
+        self.status_cpu=QLabel("CPU: -"); status_bar.addWidget(self.status_cpu)
+        self.status_gpu=QLabel("GPU: -"); status_bar.addWidget(self.status_gpu)
+        status_bar.addStretch()
+        self.status_msg=QLabel("준비됨"); status_bar.addWidget(self.status_msg)
+        root.addLayout(status_bar)
+        self._mem_timer=QTimer(); self._mem_timer.timeout.connect(self._update_status_bar); self._mem_timer.start(1000)
 
     def _build_preview_tab(self) -> QWidget:
         """Prompt Preview 탭 (v0.1 §25)."""
@@ -89,6 +113,56 @@ class MainWindow(QWidget):
         self.session_browser.regenerate_requested.connect(self._on_regenerate_from_session)
         return self.session_browser
 
+    def _toggle_theme(self) -> None:
+        """다크/라이트 테마 토글 (§24)."""
+        theme = self.theme_manager.toggle_theme()
+        self.log.append(f"Theme switched to: {theme}")
+
+    def _run_dry_run(self) -> None:
+        """Dry Run Mode 실행 (§27)."""
+        from app.engine.validation.dry_run import DryRunResult
+        image_path = Path(self.image.currentData()) if self.image.currentData() else None
+        llm_path = Path(self.llm.currentData()) if self.llm.currentData() else None
+        if not image_path or not image_path.exists():
+            QMessageBox.warning(self, "모델 필요", "이미지 모델을 먼저 선택해주세요.")
+            return
+        try:
+            result: DryRunResult = self.engine.dry_runner.run(
+                image_path, llm_path,
+                self.w.value(), self.h.value(),
+                self.steps.value(), self.cfg.value(), self.seed.value(),
+            )
+            msg = f"준비 상태: {'✅ 준비 완료' if result.ready else '❌ 준비 안됨'}\n\n"
+            if result.warnings:
+                msg += "경고:\n" + "\n".join(result.warnings) + "\n\n"
+            if result.errors:
+                msg += "오류:\n" + "\n".join(result.errors) + "\n\n"
+            msg += f"VRAM: {result.available_vram_gb}GB available / {result.total_vram_gb}GB total\n"
+            msg += f"예상 이미지 메모리: {result.estimated_image_memory_gb}GB"
+            QMessageBox.information(self, "환경 검사 결과", msg)
+        except Exception as e:
+            QMessageBox.critical(self, "Dry Run 오류", str(e))
+
+    def _update_status_bar(self) -> None:
+        """하단 상태창: RAM/VRAM/CPU/GPU 사용률 실시간 업데이트 (§26)."""
+        try:
+            import psutil
+            ram = psutil.virtual_memory()
+            self.status_ram.setText(f"RAM: {ram.used/1024**3:.1f}/{ram.total/1024**3:.1f}GB ({ram.percent}%)")
+            self.status_cpu.setText(f"CPU: {psutil.cpu_percent(interval=0.1):.1f}%")
+        except Exception:
+            pass
+        try:
+            snap = self.engine.memory.take_snapshot("status_bar")
+            if snap.vram_free_gb is not None and snap.vram_total_gb is not None:
+                used = (snap.vram_total_gb - snap.vram_free_gb)
+                pct = (used / snap.vram_total_gb * 100) if snap.vram_total_gb > 0 else 0
+                self.status_vram.setText(f"VRAM: {used:.1f}/{snap.vram_total_gb:.1f}GB ({pct:.0f}%)")
+            if snap.vram_allocated_gb is not None:
+                self.status_gpu.setText(f"GPU alloc: {snap.vram_allocated_gb:.1f}GB")
+        except Exception:
+            pass
+
     def _on_regenerate_from_output(self, prompt: str, params: dict) -> None:
         """Output Browser에서 재생성 요청."""
         self.prompt.setPlainText(prompt)
@@ -128,9 +202,10 @@ class MainWindow(QWidget):
         self.llm.addItem("사용 안 함 (fallback)", None)
         for p in images: self.image.addItem(p.name, str(p))
         self.status.setText(f"LLM {len(llms)}개 / 이미지 모델 {len(images)}개 발견")
-
+        self.llm_count.setText(f"LLM: {len(llms)} found")
+        self.image_count.setText(f"Image: {len(images)} found")
         if images:
-            arch = "sdxl" if "sdxl" in images[0].name.lower() else "sd15"
+            arch = "sdxl" if "sdxl" in images[0].name.lower() else ("flux" if "flux" in images[0].name.lower() else "sd15")
             self.prompt_preview.set_model(arch, self.llm.currentData() if self.llm.currentData() else None)
 
     def start(self):
@@ -152,6 +227,7 @@ class MainWindow(QWidget):
     def fail(self,msg): self.generate.setEnabled(True); self.status.setText("실패"); self.log.append("ERROR: "+msg); QMessageBox.critical(self,"생성 실패",msg)
 
     def closeEvent(self, event):
+        self._mem_timer.stop()
         self.engine.shutdown()
         super().closeEvent(event)
 

@@ -53,7 +53,7 @@ class GenerationController:
             self.memory.take_snapshot("before_llm")
 
             if req.llm_path:
-                from ..llm.manager import LocalLLM
+                from ..llm.llama_cpp import LocalLLM
                 if progress: progress(5, "로컬 LLM 로드")
                 llm = LocalLLM(req.llm_path, self.engine.hardware.device, self.logger).load()
             else:

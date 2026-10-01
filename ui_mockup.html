@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>그려줘 v0.1 - UI Mockup</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #eee;
+            min-height: 100vh;
+        }
+        .window {
+            width: 1400px;
+            height: 900px;
+            background: #0f0f23;
+            border: 1px solid #3a3a5a;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+            overflow: hidden;
+            margin: 40px auto;
+        }
+        .title-bar {
+            background: linear-gradient(90deg, #2d2d44 0%, #1e1e3a 100%);
+            padding: 12px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #3a3a5a;
+        }
+        .title-bar h1 {
+            font-size: 22px;
+            font-weight: 600;
+            color: #fff;
+        }
+        .title-bar .subtitle {
+            font-size: 13px;
+            color: #a0a0c0;
+        }
+        .tabs {
+            display: flex;
+            background: #141424;
+            border-bottom: 1px solid #3a3a5a;
+        }
+        .tab {
+            padding: 14px 24px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            color: #a0a0c0;
+            transition: all 0.2s;
+            border-right: 1px solid #3a3a5a;
+        }
+        .tab:hover { background: #2a2a4a; }
+        .tab.active {
+            background: #2d2d44;
+            color: #fff;
+            border-bottom: 2px solid #4d9eff;
+        }
+        .content {
+            display: flex;
+            padding: 20px;
+            gap: 20px;
+        }
+        .main-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+        .card {
+            background: #1e1e3a;
+            border-radius: 10px;
+            padding: 16px;
+            border: 1px solid #3a3a5a;
+        }
+        .card h3 {
+            font-size: 14px;
+            color: #8a8abf;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .card h3::before {
+            content: '';
+            width: 8px;
+            height: 8px;
+            background: #4d9eff;
+            border-radius: 50%;
+        }
+        .system-info {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+        }
+        .info-item {
+            background: #141424;
+            padding: 12px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        .info-item .label {
+            font-size: 11px;
+            color: #8a8abf;
+            margin-bottom: 4px;
+        }
+        .info-item .value {
+            font-size: 16px;
+            font-weight: 600;
+            color: #fff;
+        }
+        .info-item .value.warning { color: #ffb74d; }
+        .info-item .value.error { color: #ef5350; }
+        .btn-row {
+            display: flex;
+            gap: 12px;
+            margin-top: 8px;
+        }
+        .btn {
+            padding: 8px 16px;
+            border-radius: 6px;
+            border: none;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        .btn.primary {
+            background: #4d9eff;
+            color: #141424;
+        }
+        .btn.primary:hover {
+            background: #6bb3ff;
+        }
+        .btn.secondary {
+            background: #2a2a4a;
+            color: #e0e0e0;
+            border: 1px solid #3a3a5a;
+        }
+        .btn.secondary:hover {
+            background: #3a3a5a;
+        }
+        .btn.danger {
+            background: #ef5350;
+            color: #fff;
+        }
+        .btn.danger:hover {
+            background: #ff7a65;
+        }
+        .split-container {
+            display: flex;
+            gap: 16px;
+            flex: 1;
+        }
+        .left-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+        .right-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+        .chat-container {
+            background: #141424;
+            border-radius: 10px;
+            padding: 16px;
+            border: 1px solid #3a3a5a;
+            flex: 1;
+            min-height: 400px;
+        }
+        .chat-message {
+            margin-bottom: 16px;
+            display: flex;
+            gap: 12px;
+        }
+        .chat-message.user {
+            flex-direction: row-reverse;
+            gap: 8px;
+        }
+        .chat-message .avatar {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .chat-message.user .avatar {
+            background: #4d9eff;
+            color: #141424;
+        }
+        .chat-message .ai .avatar {
+            background: #6a5acd;
+            color: #fff;
+        }
+        .chat-message .bubble {
+            max-width: 600px;
+            padding: 12px 16px;
+            border-radius: 16px;
+            word-wrap: break-word;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        .chat-message.user .bubble {
+            background: #4d9eff;
+            color: #141424;
+            border-bottom-right-radius: 4px;
+        }
+        .chat-message .ai .bubble {
+            background: #2a2a4a;
+            color: #e0e0e0;
+            border-bottom-left-radius: 4px;
+        }
+        .generation-card {
+            background: #1e1e3a;
+            border-radius: 10px;
+            padding: 16px;
+            border: 1px solid #3a3a5a;
+            margin-top: 12px;
+        }
+        .generation-card .status {
+            font-size: 13px;
+            color: #8a8abf;
+            margin-bottom: 8px;
+        }
+        .generation-card .progress {
+            height: 6px;
+            background: #2a2a4a;
+            border-radius: 3px;
+            overflow: hidden;
+            margin-bottom: 12px;
+        }
+        .generation-card .progress .fill {
+            height: 100%;
+            background: linear-gradient(90deg, #4d9eff 0%, #6bb3ff 100%);
+            width: 60%;
+            border-radius: 3px;
+        }
+        .image-card {
+            background: #1e1e3a;
+            border-radius: 10px;
+            padding: 16px;
+            border: 1px solid #3a3a5a;
+        }
+        .image-card .image {
+            width: 100%;
+            height: 300px;
+            background: #141424;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #8a8abf;
+            font-size: 14px;
+            margin-bottom: 12px;
+        }
+        .image-card .meta {
+            font-size: 12px;
+            color: #8a8abf;
+            line-height: 1.6;
+        }
+        .prompt-card {
+            background: #1e1e3a;
+            border-radius: 10px;
+            padding: 16px;
+            border: 1px solid #3a3a5a;
+        }
+        .prompt-card .title {
+            font-size: 13px;
+            color: #8a8abf;
+            margin-bottom: 8px;
+        }
+        .prompt-card .content {
+            background: #141424;
+            padding: 12px;
+            border-radius: 6px;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            line-height: 1.5;
+            color: #e0e0e0;
+            white-space: pre-wrap;
+            min-height: 80px;
+        }
+        .tree-container {
+            background: #1e1e3a;
+            border-radius: 10px;
+            padding: 16px;
+            border: 1px solid #3a3a5a;
+            flex: 1;
+            min-height: 400px;
+        }
+        .tree-item {
+            padding: 8px;
+            border-radius: 4px;
+            margin-bottom: 4px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .tree-item:hover {
+            background: #2a2a4a;
+        }
+        .tree-item.date {
+            font-weight: 600;
+            color: #4d9eff;
+            border-bottom: 1px solid #3a3a5a;
+            margin-bottom: 8px;
+        }
+        .tree-item.image {
+            padding-left: 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .tree-item .seed {
+            color: #8a8abf;
+            font-size: 12px;
+        }
+        .toolbar {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+        .toolbar .btn {
+            padding: 6px 12px;
+            font-size: 12px;
+        }
+        .preview-section {
+            background: #1e1e3a;
+            border-radius: 10px;
+            padding: 16px;
+            border: 1px solid #3a3a5a;
+        }
+        .preview-section .label {
+            font-size: 13px;
+            color: #8a8abf;
+            margin-bottom: 8px;
+        }
+        .preview-section .value {
+            font-size: 14px;
+            color: #fff;
+            padding: 8px;
+            background: #141424;
+            border-radius: 6px;
+        }
+        .form-row {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+        .form-row label {
+            width: 80px;
+            font-size: 13px;
+            color: #a0a0c0;
+        }
+        .form-row input, .form-row select, .form-row textarea {
+            flex: 1;
+            padding: 8px 12px;
+            border-radius: 6px;
+            border: 1px solid #3a3a5a;
+            background: #141424;
+            color: #e0e0e0;
+            font-size: 14px;
+        }
+        .form-row textarea {
+            min-height: 80px;
+            resize: vertical;
+        }
+        .form-row input[type="number"] {
+            width: 80px;
+        }
+        .status-bar {
+            background: #141424;
+            padding: 8px 20px;
+            font-size: 13px;
+            color: #8a8abf;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-top: 1px solid #3a3a5a;
+        }
+        .progress-bar {
+            width: 200px;
+            height: 4px;
+            background: #2a2a4a;
+            border-radius: 2px;
+            overflow: hidden;
+        }
+        .progress-bar .fill {
+            height: 100%;
+            background: #4d9eff;
+            width: 30%;
+        }
+    </style>
+</head>
+<body>
+    <div class="window">
+        <!-- Title Bar -->
+        <div class="title-bar">
+            <div>
+                <h1>그려줘 v0.1</h1>
+                <div class="subtitle">Local AI Image Studio · Powered by Geurim-gyeol</div>
+            </div>
+            <div class="system-info">
+                <div class="info-item">
+                    <div class="label">Backend</div>
+                    <div class="value">CUDA</div>
+                </div>
+                <div class="info-item">
+                    <div class="label">Device</div>
+                    <div class="value">NVIDIA RTX 4070</div>
+                </div>
+                <div class="info-item">
+                    <div class="label">VRAM</div>
+                    <div class="value">12.0 GB</div>
+                </div>
+                <div class="info-item">
+                    <div class="label">LLM Models</div>
+                    <div class="value">3 found</div>
+                </div>
+                <div class="info-item">
+                    <div class="label">Image Models</div>
+                    <div class="value">2 found</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tabs -->
+        <div class="tabs">
+            <div class="tab active" onclick="showTab('preview')">Prompt Preview</div>
+            <div class="tab" onclick="showTab('generate')">Generate</div>
+            <div class="tab" onclick="showTab('output')">Output Browser</div>
+            <div class="tab" onclick="showTab('session')">Session History</div>
+        </div>
+
+        <!-- Content Area -->
+        <div class="content">
+            <!-- Left Panel (60%) -->
+            <div class="left-panel">
+                <!-- System Info Card -->
+                <div class="card">
+                    <h3>System Information</h3>
+                    <div class="system-info">
+                        <div class="info-item">
+                            <div class="label">Backend</div>
+                            <div class="value">CUDA</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="label">Device</div>
+                            <div class="value">NVIDIA RTX 4070</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="label">Precision</div>
+                            <div class="value">fp16</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="label">VRAM</div>
+                            <div class="value">12.0 GB</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="label">LLM Models</div>
+                            <div class="value">3 found</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="label">Image Models</div>
+                            <div class="value">2 found</div>
+                        </div>
+                    </div>
+                    <div class="btn-row">
+                        <button class="btn secondary">다크/라이트 전환</button>
+                        <button class="btn secondary">환경 검사 (Dry Run)</button>
+                    </div>
+                </div>
+
+                <!-- Chat Container (Chatbot Style) -->
+                <div class="chat-container" id="chatContainer">
+                    <!-- User Message -->
+                    <div class="chat-message user">
+                        <div class="avatar">나</div>
+                        <div class="bubble">
+                            비 오는 날 도쿄의 골목을 걷는 소녀
+                        </div>
+                    </div>
+                    
+                    <!-- AI Response with Prompt Card -->
+                    <div class="chat-message ai">
+                        <div class="avatar">AI</div>
+                        <div class="bubble">
+                            <div class="prompt-card">
+                                <div class="title">✨ AI가 다듬은 프롬프트</div>
+                                <div class="content">
+A young girl walks through a rainy Tokyo alley at night, neon signs reflecting on wet pavement, 
+cinematic lighting, moody atmosphere, detailed urban scenery, rain droplets on windows, 
+vibrant colors, 8K resolution, ultra-detailed, sharp focus
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Generation Card -->
+                    <div class="generation-card">
+                        <div class="status">이미지 생성 중... (45%)</div>
+                        <div class="progress">
+                            <div class="fill"></div>
+                        </div>
+                        <button class="btn danger">■ 취소</button>
+                    </div>
+
+                    <!-- Image Card -->
+                    <div class="image-card">
+                        <div class="image">
+                            [이미지 미리보기]
+                        </div>
+                        <div class="meta">
+                            <strong>Seed:</strong> 123456789<br>
+                            <strong>Model:</strong> SDXL<br>
+                            <strong>Size:</strong> 1024x1024<br>
+                            <strong>Steps:</strong> 30 | CFG: 7.0<br>
+                            <strong>Created:</strong> 2026-10-01 14:30:25
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Panel (40%) -->
+            <div class="right-panel">
+                <!-- Prompt Preview Section -->
+                <div class="preview-section">
+                    <div class="label">Target Model</div>
+                    <div class="value">SDXL</div>
+                </div>
+                
+                <div class="preview-section">
+                    <div class="label">Prompt Style</div>
+                    <div class="value">Natural / Tag 혼합</div>
+                </div>
+                
+                <div class="preview-section">
+                    <div class="label">Negative Prompt</div>
+                    <div class="content" style="min-height: 60px;">
+worst quality, low quality, blurry, grainy, lowres, mutated hands, poorly drawn hands, extra fingers
+                    </div>
+                </div>
+
+                <!-- Generation Controls -->
+                <div class="card">
+                    <h3>Generation Parameters</h3>
+                    <div class="form-row">
+                        <label>Width:</label>
+                        <input type="number" value="1024" min="64" max="4096">
+                    </div>
+                    <div class="form-row">
+                        <label>Height:</label>
+                        <input type="number" value="1024" min="64" max="4096">
+                    </div>
+                    <div class="form-row">
+                        <label>Steps:</label>
+                        <input type="number" value="30" min="1" max="100">
+                    </div>
+                    <div class="form-row">
+                        <label>CFG:</label>
+                        <input type="number" value="7.0" min="0" max="30" step="0.1">
+                    </div>
+                    <div class="form-row">
+                        <label>Seed:</label>
+                        <input type="number" value="-1">
+                    </div>
+                    <div class="form-row">
+                        <label>Negative:</label>
+                        <textarea>- worst quality, low quality...</textarea>
+                    </div>
+                    <div class="btn-row">
+                        <button class="btn primary">그려줘</button>
+                        <button class="btn secondary">중지</button>
+                    </div>
+                </div>
+
+                <!-- Model Selection -->
+                <div class="card">
+                    <h3>Models</h3>
+                    <div class="form-row">
+                        <label>LLM:</label>
+                        <select>
+                            <option>Qwen 2.5 7B Q4_K_M.gguf</option>
+                            <option>Mistral 7B Instruct Q4_K_M.gguf</option>
+                            <option>LLaMA 3.1 8B Q4_K_M.gguf</option>
+                            <option>사용 안 함 (fallback)</option>
+                        </select>
+                    </div>
+                    <div class="form-row">
+                        <label>Image:</label>
+                        <select>
+                            <option>SDXL 1.0 Base</option>
+                            <option>SDXL 1.0 Refiner</option>
+                            <option>Flux Schnell</option>
+                        </select>
+                    </div>
+                    <div class="btn-row">
+                        <button class="btn secondary">모델 새로고침</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Status Bar -->
+        <div class="status-bar">
+            <span>준비됨</span>
+            <div class="progress-bar">
+                <div class="fill"></div>
+            </div>
+            <span>00:00 / 00:00</span>
+        </div>
+    </div>
+
+    <script>
+        function showTab(tabName) {
+            const tabs = document.querySelectorAll('.tab');
+            tabs.forEach(t => t.classList.remove('active'));
+            event.target.classList.add('active');
+            // 실제 탭 전환 로직은 여기에 추가
+        }
+    </script>
+</body>
+</html>

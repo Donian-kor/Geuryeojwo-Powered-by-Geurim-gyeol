@@ -109,7 +109,7 @@ class PromptPreviewWidget(QWidget):
 
         if self._current_llm_path:
             try:
-                from app.engine.llm.manager import LocalLLM
+                from app.engine.llm.llama_cpp import LocalLLM
                 from app.engine.hardware.detector import detect_hardware
                 hardware = detect_hardware()
                 llm = LocalLLM(self._current_llm_path, hardware.device, self.prompt_engine.logger)

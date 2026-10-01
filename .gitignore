@@ -9,3 +9,6 @@ models/*
 !models/vae/.gitkeep
 !models/lora/.gitkeep
 *.log
+_smoke_test.py
+_test_llm.py
+_test_models.py
