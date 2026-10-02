@@ -15,3 +15,5 @@ _c3.txt
 _c3e.txt
 .kilo/
 .vscode/
+# ComfyUI 에서 가져온 참고용 워크플로. 등록은 workflows/ 에서 따로 한다
+예시api_*.json
