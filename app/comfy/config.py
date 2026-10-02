@@ -5,6 +5,7 @@ config/comfyui.json 을 읽고 접속 정보를 제공한다.
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -27,6 +28,9 @@ DEFAULT_CONFIG = {
         "loras",
         "text_encoders",
     ],
+    # ComfyUI 의 models 폴더. 모델이 없으면 '어디에 넣어야 하는지'
+    # 알려줄 수 없으므로 등록 화면의 안내에 쓰인다.
+    "models_dir": "",
 }
 
 
@@ -76,6 +80,48 @@ def _windows_split(command: str) -> list[str]:
     return parts
 
 
+def _env_root(var: str) -> Path | None:
+    """환경 변수를 경로로. 없으면 None (빈 문자열로 Path 를 만들면 상대경로가 된다)."""
+    value = os.environ.get(var)
+    return Path(value) if value else None
+
+
+def _looks_like_models_dir(root: Path, folders) -> bool:
+    """모델 하위 폴더가 하나라도 있어야 모델 폴더로 본다."""
+    try:
+        return root.is_dir() and any((root / f).is_dir() for f in folders)
+    except OSError:
+        return False  # 접근 권한이 없는 경로에서 죽지 않게
+
+
+def guess_models_dir(folders=None, roots=None) -> str:
+    """ComfyUI 의 models 폴더를 찾아 경로를 돌려준다. 못 찾으면 빈 문자열.
+
+    설치 방식마다 경로가 달라 매번 물어봐야 하는데,
+    흔한 위치 몇 곳만 훑어본다. 없으면 빈 문자열을 돌려
+    호출자가 사용자에게 한 번만 물어보게 한다.
+
+    Returns:
+        str: 찾은 models 폴더 경로. 없으면 ""
+    """
+    folders = folders or DEFAULT_CONFIG["model_folders"]
+    if roots is None:
+        candidates = []
+        local = _env_root("LOCALAPPDATA")
+        roaming = _env_root("APPDATA")
+        if local is not None:
+            candidates.append(local / "Comfy-Desktop" / "ComfyUI-Shared" / "models")
+        if roaming is not None:
+            candidates.append(roaming / "ComfyUI" / "models")
+        candidates.append(Path.cwd() / "ComfyUI" / "models")
+        candidates.append(Path.cwd() / "models")
+        roots = candidates
+    for root in roots:
+        if _looks_like_models_dir(Path(root), folders):
+            return str(root)
+    return ""
+
+
 @dataclass
 class ComfyUIConfig:
     """ComfyUI 접속 설정."""
@@ -89,6 +135,9 @@ class ComfyUIConfig:
     launch_working_dir: str = ""
     launch_wait_seconds: int = 90
     model_folders: list[str] = field(default_factory=list)
+    # ComfyUI 의 models 폴더. 비어 있으면 guess_models_dir() 로 찾고,
+    # 그것도 없으면 사용자에게 한 번 물어본 뒤 여기에 기억한다.
+    models_dir: str = ""
 
     @property
     def base_url(self) -> str:
@@ -190,6 +239,7 @@ class ComfyUIConfig:
             launch_working_dir=data.get("launch_working_dir", ""),
             launch_wait_seconds=int(data.get("launch_wait_seconds", 90)),
             model_folders=list(data.get("model_folders", DEFAULT_CONFIG["model_folders"])),
+            models_dir=str(data.get("models_dir", "")),
         )
 
     def save(self, path: Path) -> None:
@@ -206,6 +256,7 @@ class ComfyUIConfig:
                     "launch_working_dir": self.launch_working_dir,
                     "launch_wait_seconds": self.launch_wait_seconds,
                     "model_folders": self.model_folders,
+                    "models_dir": self.models_dir,
                 },
                 ensure_ascii=False,
                 indent=2,

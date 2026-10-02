@@ -240,10 +240,72 @@ def load_workflow(path: Path) -> Workflow | None:
 
 
 def list_workflows(directory: Path) -> list[Path]:
-    """워크플로 폴더의 JSON 목록."""
+    """워크플로 폴더의 JSON 목록.
+
+    사용자가 가져온 워크플로는 profiles/ 아래에 따로 둔다.
+    우리가 배포한 것과 한 폴더에 섞이면 나중에 원래 상태로 되돌리기 어렵다.
+    """
     if not directory.exists():
         return []
-    return sorted(p for p in directory.glob("*.json") if p.is_file())
+    found = [p for p in directory.glob("*.json") if p.is_file()]
+    profiles = directory / "profiles"
+    if profiles.is_dir():
+        found += [p for p in profiles.glob("*.json") if p.is_file()]
+    return sorted(found)
+
+
+# Windows 파일 이름에 쓸 수 없는 문자.
+_UNSAFE_CHARS = '<>:"/\\|?*'
+
+
+def safe_stem(text: str) -> str:
+    """이름을 파일 이름에 쓸 수 있게 바꾼다.
+
+    Returns:
+        str: 파일 이름 조각. 비어 있으면 "workflow".
+    """
+    cleaned = "".join(
+        "_" if ch in _UNSAFE_CHARS else ch for ch in str(text)
+    ).strip().strip(".")
+    return cleaned[:60] or "workflow"
+
+
+def save_profile(workflow_dir: Path, name: str, description: str,
+                 prompt: dict, output_node: str = "") -> Path:
+    """사용자가 가져온 워크플로를 profiles/ 아래에 저장한다.
+
+    우리가 배포한 워크플로와 섞지 않는다. 섞이면 지울 때 헷갈리고
+    원래 상태로 되돌리기 어렵다.
+
+    이름을 바꿔 가면 GComboBox 항목의 이름이 달라져 드롭다운에서
+    찾기 어려워지므로, 표시 이름(name)과 파일 이름(stem)을 분리한다.
+
+    Returns:
+        Path: 저장된 파일 경로.
+    """
+    target_dir = workflow_dir / "profiles"
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    # 배포본과 이름이 겹치지 않게 한다. 드롭다운이 파일 이름으로 찾기 때문이다.
+    taken = {p.stem for p in list_workflows(workflow_dir)}
+    stem = safe_stem(name)
+    candidate = stem
+    index = 2
+    while candidate in taken:
+        candidate = f"{stem}-{index}"
+        index += 1
+    target = target_dir / f"{candidate}.json"
+
+    target.write_text(
+        json.dumps({
+            "name": name,
+            "description": description,
+            "output_node": output_node,
+            "prompt": prompt,
+        }, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return target
 
 
 # 자동 추출 대상 파라미터와 위젯 종류

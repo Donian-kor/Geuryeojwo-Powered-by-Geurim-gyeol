@@ -4,6 +4,7 @@ __pycache__/
 .env
 outputs/*
 sessions/*
+workflows/profiles/*
 models/*
 !models/README.md
 !models/.gitkeep

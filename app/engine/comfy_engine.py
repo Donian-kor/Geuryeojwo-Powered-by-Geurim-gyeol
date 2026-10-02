@@ -445,6 +445,20 @@ class GeurimGyeolEngine:
         except Exception:
             return {}
 
+    def node_types(self) -> set[str]:
+        """ComfyUI 가 아는 노드 타입 이름 집합.
+
+        워크플로가 설치되지 않은 노드를 쓰는지 확인할 때 쓴다.
+        /object_info 응답이 크다(노드 1000종 이상) 그래서 전체 주기는
+        아니라 워크플로를 가져올 때 한 번만 읽는다.
+        """
+        try:
+            info = self._run(self.client.get_object_info())
+        except Exception as exc:
+            self.logger.warning("노드 목록 조회 실패: %s", exc)
+            return set()
+        return set(info) if isinstance(info, dict) else set()
+
     # --- 취소 -------------------------------------------------------
 
     def cancel(self) -> None:
