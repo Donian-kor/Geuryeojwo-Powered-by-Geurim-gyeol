@@ -12,7 +12,8 @@ from PySide6.QtWidgets import (
 from app.comfy.check import prompt_of
 from app.comfy.config import guess_models_dir
 from app.comfy.model_family import (
-    detect_file_family, detect_prompt_family, family_label, is_compatible,
+    compatible_models, detect_file_family, family_label, is_compatible,
+    workflow_family,
 )
 from app.comfy.workflow import (
     collect_extra, installed_models, missing_models, save_profile,
@@ -50,6 +51,9 @@ _ENHANCER_KEY = "local_model"
 _ENHANCER_CAPTION = "인핸서 모델 (로컬 GGUF)"
 # 인접서 GGUF 가 있는 ComfyUI 폴더. (T8 팩 코드의 MODEL_SUBDIRECTORY)
 _ENHANCER_FOLDER = "LLM"
+
+# 이 계열에 맞는 설치 모델이 하나도 없을 때 칸 맨 위에 놓이는 항목.
+_NO_MODEL = "(이 계열 모델 없음 — 선택하세요)"
 
 
 def _row_order(key: str) -> tuple[float, int]:
@@ -1270,14 +1274,11 @@ class MainWindow(QWidget):
         계열을 모르면 아무것도 막지 않는다. 추측해서 막으면 사용자가
         쓸 수 있는 모델까지 못 쓰게 된다.
         """
-        wf = self.engine.active_workflow
-        if wf is None or not folder:
+        family = self._active_family()
+        if not family or not folder:
             return
         models_dir = self._models_dir()
         if not models_dir:
-            return
-        family = detect_prompt_family(wf.prompt, models_dir)
-        if not family:
             return
         item_model = combo.model()
         for index in range(combo.count()):
@@ -1296,6 +1297,31 @@ class MainWindow(QWidget):
                 f"{name} 은(는) {family_label(model_family)} 계열이라 "
                 "함께 쓸 수 없습니다."
             )
+
+    def _active_family(self) -> str:
+        """현재 워크플로의 계열. 모르면 빈 문자열.
+
+        models 경로를 모르면 판별을 보류한다. 경로가 없는데 실제 설치된
+        파일이 있다고 가정해 판별하면, 목록의 모든 항목이 '다른 계열' 로
+        눌려 사라진다.
+        """
+        models_dir = self._models_dir()
+        if not models_dir:
+            return ""
+        return workflow_family(self.engine.active_workflow, models_dir)
+
+    def _auto_pick_model(self, folder: str, items: list[str]) -> str:
+        """이 계열에 맞는 설치 모델 하나를 고른다. 없으면 빈 문자열.
+
+        우리가 배포한 기본 워크플로는 모델 이름을 비워 두어 사용자가
+        고르도록 한다. 여기서 대신 골라 주면 처음 켰을 때 바로 그림을
+        만들 수 있다.
+        """
+        family = self._active_family()
+        if not family or not items:
+            return ""
+        usable = compatible_models(items, family, self._models_dir(), folder)
+        return usable[0] if usable else ""
 
     def _setup_models(self, params: dict, defaults: dict,
                       preserve_selection: bool = False) -> None:
@@ -1350,12 +1376,29 @@ class MainWindow(QWidget):
                 folder = spec.kind.split(":", 1)[1] if ":" in spec.kind else ""
                 items = list(options.get(folder) or [])
                 current = defaults.get(key)
+                _no_fit = False
                 # 계열이 정해지는 폴더만 감시 대상이다.
                 if folder in ("checkpoints", "diffusion_models"):
                     self._family_guards.append((key, folder))
+                    # 기본 워크플로는 모델 이름을 비워 뒀다. 계열에 맞는
+                    # 설치 모델이 있으면 대신 골라 준다.
+                    if not current:
+                        current = self._auto_pick_model(folder, items)
+                        _no_fit = bool(items) and not current
             if not items:
                 # ComfyUI 응답이 없으면 워크플로 기본값만
                 items = [current] if current else []
+            # 계열에 맞는 모델이 하나도 없으면 '고른 것' 없이 시작한다.
+            # 이대로 두면 목록의 첫 항목이 그대로 고려져, 다른 계열
+            # (예: Z-Image 칸에 Qwen) 모델로 조용히 그림을 만들게 된다.
+            # 그건 사용자가 고른 게 아니라 프로그램이 대신 정한 것이다.
+            if _no_fit and items:
+                combo.addItem(_NO_MODEL)
+                for item in items:
+                    combo.addItem(item)
+                combo.setCurrentIndex(0)
+                combo.blockSignals(False)
+                continue
             for item in items:
                 combo.addItem(item)
             # 목록에 없다고 버리지 말고 그대로 넣는다 (교체하지 않는다)
@@ -1433,6 +1476,13 @@ class MainWindow(QWidget):
         콤보 값이 바뀌면 호출되므로, 사용자가 설치된 모델을 고르면
         경고가 사라진다.
         """
+        # 계열에 맞는 모델이 아예 없는 경우를 먼저 말한다.
+        # 이건 '설치 안 된 파일' 문제가 아니라 '이 계열의 모델이 없다' 이다.
+        family_gap = self._missing_family_model()
+        if family_gap:
+            self._model_warning.setText(family_gap)
+            self._model_warning.setVisible(True)
+            return
         missing = self._missing_models()
         if not missing:
             self._model_warning.setText("")
@@ -1446,6 +1496,31 @@ class MainWindow(QWidget):
             "Model 탭에서 ComfyUI 에 설치된 모델로 바꿔야 생성할 수 있습니다."
         )
         self._model_warning.setVisible(True)
+
+    def _missing_family_model(self) -> str:
+        """이 계열에 맞는 설치 모델이 하나도 없을 때 안내문. 있으면 빈 문자열.
+
+        기본 워크플로는 모델 이름을 비워 두어 고를 수 없다. 계열에 맞는
+        모델이 없으면 무엇을 설치해야 하는지 알려야 사용자가 움직일 수 있다.
+        """
+        family = self._active_family()
+        if not family:
+            return ""
+        params = self._active_params()
+        for key, folder in self._family_guards:
+            if key not in params:
+                continue
+            installed = self._installed_models(key)
+            if not installed:
+                continue  # ComfyUI 목록을 못 받았으면 판단을 보류한다
+            if compatible_models(installed, family, self._models_dir(), folder):
+                return ""
+        label = family_label(family)
+        return (
+            f"⚠ {label} 계열 모델이 설치되어 있지 않습니다\n"
+            f"ComfyUI 의 models\\checkpoints 또는 models\\diffusion_models 폴더에\n"
+            f"{label} 계열 모델 파일을 넣고 Model 탭에서 다시 고르면 됩니다."
+        )
 
     def _setup_lora_strength(self, params: dict, defaults: dict) -> None:
         """LoRA 강도 줄을 워크플로에 맞춘다.
@@ -1571,6 +1646,14 @@ class MainWindow(QWidget):
             QMessageBox.warning(self, "ComfyUI 오프라인",
                                 "ComfyUI 서버에 접속할 수 없습니다.\n"
                                 "ComfyUI를 실행한 뒤 상태를 새로고침해주세요."); return
+
+        # 이 계열에 맞는 모델이 아예 없다면 먼저 알려 준다.
+        # '설치 안 된 파일' 과 '계열 모델 미설치' 는 원인이 다르다.
+        family_gap = self._missing_family_model()
+        if family_gap:
+            label = family_label(self._active_family()) or "이 워크플로"
+            QMessageBox.warning(self, f"{label} 계열 모델 필요", family_gap)
+            return
 
         # 워크플로가 지정한 모델이 설치되지 않았으면 미리 막는다.
         # 없던 모델을 목록의 다른 파일로 대체하지 않으므로 그대로 보내면

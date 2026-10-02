@@ -136,6 +136,36 @@ def is_compatible(workflow_family: str, model_family: str) -> bool:
     return workflow_family == model_family
 
 
+def workflow_family(workflow, models_dir: Path | str = "") -> str:
+    """로드된 워크플로의 계열.
+
+    파일에 "family" 가 적혀 있으면 그것을, 없으면 물고 있는 모델을 본다.
+    우리가 배포한 기본 워크플로는 모델 이름을 비워 두기 때문에 늘
+    첫 번째 경로로 판별된다.
+    """
+    if workflow is None:
+        return FAMILY_UNKNOWN
+    declared = (workflow.meta or {}).get("family", "")
+    return detect_prompt_family(
+        workflow.prompt, models_dir, declared=declared
+    )
+
+
+def compatible_models(names, family: str, models_dir: Path | str,
+                      folder: str) -> list[str]:
+    """설치된 모델 중 이 계열에 맞는 파일만 (파일명 목록).
+
+    판별불가 파일은 남긴다. 추측해서 빼면 쓸 수 있는 모델까지 잃는다.
+    """
+    if not family or not models_dir:
+        return list(names)
+    root = Path(models_dir) / folder
+    return [
+        name for name in names
+        if is_compatible(family, detect_file_family(root / name))
+    ]
+
+
 def prompt_model_files(prompt: dict) -> list[str]:
     """워크플로가 실제로 쓰는 모델 파일명 (확산 모델·체크포인트).
 
@@ -152,15 +182,22 @@ def prompt_model_files(prompt: dict) -> list[str]:
     return result
 
 
-def detect_prompt_family(prompt: dict, models_dir: Path | str) -> str:
-    """워크플로가 쓰는 모델로 그 워크플로의 계열을 정한다.
+def detect_prompt_family(prompt: dict, models_dir: Path | str,
+                         declared: str = "") -> str:
+    """워크플로의 계열. 모르면 빈 문자열.
 
-    워크플로의 CLIP 타입으로 따로 추측하지 않는다. 워크플로가 이미 그
-    계열의 모델을 물고 있으므로, 그 파일을 보는 편이 정확하다.
+    Args:
+        prompt: API 형식 워크플로 노드
+        models_dir: ComfyUI models 폴더
+        declared: 워크플로 파일이 밝힌 계열 (meta 의 "family").
+            우리가 배포한 기본 워크플로는 모델 이름을 비워 두므로 이 값을 쓴다.
 
     Returns:
-        계열 키. 모르면 빈 문자열.
+        계열 키. 모르면 FAMILY_UNKNOWN.
     """
+    # 파일이 밝힌 계열이 가장 확실하다. 모델 파일이 없어도 안다.
+    if declared in FAMILY_LABELS:
+        return declared
     if not models_dir:
         return FAMILY_UNKNOWN
     root = Path(models_dir)

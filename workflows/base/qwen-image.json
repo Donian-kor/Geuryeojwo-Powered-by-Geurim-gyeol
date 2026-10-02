@@ -1,0 +1,58 @@
+{
+  "name": "기본 · Qwen-Image",
+  "description": "Qwen-Image 계열 기본 워크플로. 한글이나 중국어 프롬프트가 잘 나옵니다.",
+  "family": "qwen-image",
+  "output_node": "7",
+  "prompt": {
+    "1": {
+      "class_type": "UNETLoader",
+      "inputs": { "unet_name": "", "weight_dtype": "default" },
+      "_meta": { "title": "확산 모델 로드" }
+    },
+    "2": {
+      "class_type": "CLIPLoader",
+      "inputs": { "clip_name": "", "type": "qwen_image", "device": "default" },
+      "_meta": { "title": "CLIP 로드" }
+    },
+    "3": {
+      "class_type": "VAELoader",
+      "inputs": { "vae_name": "" },
+      "_meta": { "title": "VAE 로드" }
+    },
+    "4": {
+      "class_type": "TextEncodeQwenImage21",
+      "inputs": {
+        "prompt": "",
+        "negative_prompt": "",
+        "resolution": 1024,
+        "clip": ["2", 0]
+      },
+      "_meta": { "title": "프롬프트 인코딩" }
+    },
+    "5": {
+      "class_type": "EmptyLatentImage",
+      "inputs": { "width": 1024, "height": 1024, "batch_size": 1 },
+      "_meta": { "title": "빈 잠재 이미지" }
+    },
+    "6": {
+      "class_type": "KSampler",
+      "inputs": {
+        "seed": 0, "steps": 25, "cfg": 1.0,
+        "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0,
+        "model": ["1", 0], "positive": ["4", 0], "negative": ["4", 1],
+        "latent_image": ["5", 0]
+      },
+      "_meta": { "title": "KSampler" }
+    },
+    "7": {
+      "class_type": "VAEDecode",
+      "inputs": { "samples": ["6", 0], "vae": ["3", 0] },
+      "_meta": { "title": "VAE 디코드" }
+    },
+    "8": {
+      "class_type": "SaveImage",
+      "inputs": { "filename_prefix": "geuryeojwo/qwen-image", "images": ["7", 0] },
+      "_meta": { "title": "이미지 저장" }
+    }
+  }
+}

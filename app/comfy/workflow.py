@@ -291,15 +291,17 @@ def _merge_parameters(saved: dict, prompt: dict) -> dict:
 def list_workflows(directory: Path) -> list[Path]:
     """워크플로 폴더의 JSON 목록.
 
-    사용자가 가져온 워크플로는 profiles/ 아래에 따로 둔다.
-    우리가 배포한 것과 한 폴더에 섞이면 나중에 원래 상태로 되돌리기 어렵다.
+    우리가 배포한 기본 워크플로는 base/ 아래에, 사용자가 가져온 것은
+    profiles/ 아래에 따로 둔다. 한 폴더에 섞이면 지울 때 헷갈리고,
+    사용자가 자기 것을 지울 때 ours 까지 함께 지킬 수 있다.
     """
     if not directory.exists():
         return []
     found = [p for p in directory.glob("*.json") if p.is_file()]
-    profiles = directory / "profiles"
-    if profiles.is_dir():
-        found += [p for p in profiles.glob("*.json") if p.is_file()]
+    for sub in ("base", "profiles"):
+        folder = directory / sub
+        if folder.is_dir():
+            found += [p for p in folder.glob("*.json") if p.is_file()]
     return sorted(found)
 
 
