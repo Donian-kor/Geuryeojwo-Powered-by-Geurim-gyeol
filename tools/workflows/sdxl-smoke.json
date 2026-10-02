@@ -1,0 +1,55 @@
+{
+  "name": "SDXL 스모크",
+  "description": "자주 돌리는 실제 생성 확인용. 체크포인트 하나만 올리므로 Qwen-Image 보다 훨씬 가볍다.",
+  "output_node": "9",
+  "prompt": {
+    "4": {
+      "class_type": "CheckpointLoaderSimple",
+      "inputs": { "ckpt_name": "RealVisXL_V5.0_fp16.safetensors" }
+    },
+    "5": {
+      "class_type": "CLIPTextEncode",
+      "inputs": { "text": "a cute cat", "clip": ["4", 1] }
+    },
+    "6": {
+      "class_type": "CLIPTextEncode",
+      "inputs": { "text": "blurry, low quality, watermark", "clip": ["4", 1] }
+    },
+    "7": {
+      "class_type": "EmptyLatentImage",
+      "inputs": { "width": 512, "height": 512, "batch_size": 1 }
+    },
+    "8": {
+      "class_type": "KSampler",
+      "inputs": {
+        "seed": 0,
+        "steps": 4,
+        "cfg": 7.0,
+        "sampler_name": "euler",
+        "scheduler": "normal",
+        "denoise": 1.0,
+        "model": ["4", 0],
+        "positive": ["5", 0],
+        "negative": ["6", 0],
+        "latent_image": ["7", 0]
+      }
+    },
+    "9": {
+      "class_type": "SaveImage",
+      "inputs": { "filename_prefix": "smoke/sdxl", "images": ["10", 0] }
+    },
+    "10": {
+      "class_type": "VAEDecode",
+      "inputs": { "samples": ["8", 0], "vae": ["4", 2] }
+    }
+  },
+  "parameters": {
+    "positive": { "node": "5", "input": "text", "label": "프롬프트", "kind": "text" },
+    "negative": { "node": "6", "input": "text", "label": "네거티브", "kind": "text" },
+    "width":    { "node": "7", "input": "width",  "label": "너비", "kind": "int" },
+    "height":   { "node": "7", "input": "height", "label": "높이", "kind": "int" },
+    "steps":    { "node": "8", "input": "steps",  "label": "스텝", "kind": "int" },
+    "cfg":      { "node": "8", "input": "cfg",    "label": "CFG",  "kind": "float" },
+    "seed":     { "node": "8", "input": "seed",   "label": "시드", "kind": "int" }
+  }
+}
