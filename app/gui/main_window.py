@@ -35,6 +35,8 @@ GB = 1024 ** 3
 _MODEL_ROW_ORDER = {
     "checkpoint": 0, "unet": 1,
     "clip": 2, "clip1": 3, "clip2": 4, "clip3": 5, "clip4": 6,
+    # CLIP 타입은 텍스트 인코더 바로 뒤에 둔다. (파일과 짝이므로)
+    "clip_type": 6.5,
     "text_encoder": 7, "vae": 8,
     "lora": 9, "existing_lora": 10, "config": 11,
     "upscale_model": 12, "sam_model": 13,
@@ -90,8 +92,8 @@ class ComfyInfoWorker(QThread):
     네 가지를 한 번에 모아 emit 하므로 요청이 늘어나지 않는다.
     """
 
-    # SystemInfo, models, samplers, enhancer_status
-    fetched = Signal(object, object, object, object)
+    # SystemInfo, models, samplers, enhancer_status, input_options
+    fetched = Signal(object, object, object, object, object)
 
     def __init__(self, engine, allow_launch: bool = True):
         super().__init__()
@@ -103,7 +105,24 @@ class ComfyInfoWorker(QThread):
         models = self.engine.model_options()
         samplers = self.engine.sampler_options()
         enhancer = self.engine.enhancer_status()
-        self.fetched.emit(info, models, samplers, enhancer)
+        options = self._input_options()
+        self.fetched.emit(info, models, samplers, enhancer, options)
+
+    def _input_options(self) -> dict[str, list[str]]:
+        """워크플로가 쓰는 노드의 열거형 선택지 (CLIP 로더의 type).
+
+        노드 종류마다 목록이 다르므로 종류를 키로 삼는다.
+        (CLIPLoader 는 30개, DualCLIPLoader 는 12개를 받는다)
+        GUI 스레드에서 조회하면 창이 멈추므로 여기서 미리 받아 둔다.
+        """
+        result: dict[str, list[str]] = {}
+        for wf in self.engine.workflows:
+            spec = (wf.parameters or {}).get("clip_type")
+            node_class = getattr(spec, "node_class", "")
+            if not node_class or node_class in result:
+                continue
+            result[node_class] = self.engine.input_options(node_class, "type")
+        return result
 
 
 def _describe_parameters(parameters: dict) -> str:
@@ -362,6 +381,8 @@ class MainWindow(QWidget):
         self.engine.refresh_workflows()
         self._info_worker=None
         self._comfy_models={}; self._comfy_samplers={}
+        # 노드 종류 -> 열거형 선택지 (CLIP 로더의 type 등)
+        self._comfy_input_options={}
         # (사용 가능 여부, 안내 문구) — 백그라운드 조회 결과가 채운다
         self._enhancer_status=None
         # 인접어 GGUF 는 워크플로에 없는 경우에도 생성 시점에 쓰인다.
@@ -576,7 +597,7 @@ class MainWindow(QWidget):
         미리 정할 수 없는 목록이므로 워크플로에 맞춰 만든다.
         """
         wanted = [key for key, spec in params.items()
-                  if str(spec.kind).startswith("model:")]
+                  if str(spec.kind).startswith("model:") or spec.kind == "choice"]
         # 순서가 흔들리면 화면이 제자리에서 점프하므로 고정한다
         wanted.sort(key=lambda k: _MODEL_ROW_ORDER.get(k, 99))
         # 워크플로에 인접어 노드가 없어도 칸은 남긴다.
@@ -980,13 +1001,16 @@ class MainWindow(QWidget):
         self._info_worker.fetched.connect(self._on_info_fetched)
         self._info_worker.start()
 
-    def _on_info_fetched(self, info, models, samplers, enhancer=None) -> None:
+    def _on_info_fetched(
+        self, info, models, samplers, enhancer=None, input_options=None
+    ) -> None:
         """ComfyUI 조회가 끝난 뒤(GUI 스레드) 위젯에 반영한다."""
         if self._closing: return
         self.engine.system_info = info
         self._comfy_models = models or {}
         self._comfy_samplers = samplers or {}
         self._enhancer_status = enhancer
+        self._comfy_input_options = input_options or {}
 
         self.comfy_label.setText(self.engine.status_text())
         self.comfy_label.setStyleSheet(
@@ -1237,9 +1261,15 @@ class MainWindow(QWidget):
                 continue
 
             combo.setEnabled(True)
-            folder = spec.kind.split(":", 1)[1] if ":" in spec.kind else ""
-            items = list(options.get(folder) or [])
-            current = defaults.get(key)
+            if spec.kind == "choice":
+                # 열거형 입력 (CLIP 로더의 type). 파일 목록이 아니라
+                # '이 노드가 받는 값' 이라 ComfyUI 의 정의를 따른다.
+                items = list(self._comfy_input_options.get(spec.node_class) or [])
+                current = defaults.get(key) or spec.default
+            else:
+                folder = spec.kind.split(":", 1)[1] if ":" in spec.kind else ""
+                items = list(options.get(folder) or [])
+                current = defaults.get(key)
             if not items:
                 # ComfyUI 응답이 없으면 워크플로 기본값만
                 items = [current] if current else []

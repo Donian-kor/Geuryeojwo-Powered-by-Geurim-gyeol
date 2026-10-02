@@ -240,9 +240,8 @@ class GeurimGyeolEngine:
         # 방금 커스텀 노드를 설치했을 수 있으니 시간을 둔다(TTL).
         self._node_types_cache: set[str] | None = None
         self._node_types_at: float = 0.0
-        # CLIPLoader 의 type 선택지도 같은 방식으로 캐한다.
-        self._clip_types_cache: list[str] | None = None
-        self._clip_types_at: float = 0.0
+        # CLIP 로더의 type 선택지. (노드 종류마다 목록이 달라 키로 나눠 캐한다)
+        self._input_options_cache: dict[str, tuple[float, list[str] | None]] = {}
 
         # ComfyUI 통신용 이벤트 루프를 하나만 두고 재사용한다.
         # (GUI 스레드와 QThread 워커가 함께 쓸 수 있으므로 직렬화한다)
@@ -495,6 +494,32 @@ class GeurimGyeolEngine:
         self._node_types_at = time.monotonic()
         return self._node_types_cache
 
+    def input_options(self, node_class: str, input_name: str) -> list[str]:
+        """노드 종류가 받는 선택지 목록. (CLIP 로더의 type 등)
+
+        노드 종류마다 다르다. DualCLIPLoader 는 CLIPLoader 와 다른
+        선택지를 받으므로 한쪽 목록을 다른 쪽에 쓰면 안 된다.
+
+        Returns:
+            list[str]: 선택지. 조회에 실패하면 빈 목록.
+        """
+        key = f"{node_class}.{input_name}"
+        stamp, cached = self._input_options_cache.get(key, (0.0, None))
+        if cached is not None and self._is_fresh(stamp):
+            return list(cached)
+        try:
+            options = self._run(self.client.get_input_options(
+                node_class, input_name
+            ))
+        except Exception as exc:
+            self.logger.warning(
+                "%s 의 %s 선택지 조회 실패: %s", node_class, input_name, exc
+            )
+            return []
+        options = list(options)
+        self._input_options_cache[key] = (time.monotonic(), options)
+        return list(options)
+
     def clip_types(self) -> list[str]:
         """CLIPLoader 가 받는 type 선택지 (qwen_image, flux, lumina2 …).
 
@@ -502,16 +527,7 @@ class GeurimGyeolEngine:
         (Flux 는 flux, Z-Image 는 lumina2, Qwen 은 qwen_image)
         워크플로에 없는 CLIP 타입을 넣으면 ComfyUI 가 거부한다.
         """
-        if self._is_fresh(self._clip_types_at) and self._clip_types_cache is not None:
-            return list(self._clip_types_cache)
-        try:
-            options = self._run(self.client.get_clip_types())
-        except Exception as exc:
-            self.logger.warning("CLIP 타입 조회 실패: %s", exc)
-            return []
-        self._clip_types_cache = list(options)
-        self._clip_types_at = time.monotonic()
-        return list(self._clip_types_cache)
+        return self.input_options("CLIPLoader", "type")
 
     @staticmethod
     def _is_fresh(stamp: float) -> bool:

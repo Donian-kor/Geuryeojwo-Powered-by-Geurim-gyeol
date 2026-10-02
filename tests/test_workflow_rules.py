@@ -10,7 +10,7 @@ import pytest
 
 from app.comfy.workflow import (
     WIDGET_KEY_TO_INPUT, ParameterSpec, collect_extra, input_of,
-    installed_models, missing_models, model_folder,
+    infer_parameters, installed_models, missing_models, model_folder,
 )
 
 OPTIONS = {
@@ -132,3 +132,96 @@ def test_collect_extra_omits_lora_strength_without_key():
     """워크플로에 strength_model 이 없으면 강도를 보내지 않는다."""
     extra = collect_extra(_params(), {}, lora_key=None, lora_strength=0.65)
     assert "lora_strength" not in extra
+
+
+# --- CLIP 로더의 type ----------------------------------------------------
+
+def _clip_loader_prompt(cls="CLIPLoader", count=1) -> dict:
+    """CLIP 로더가 있는 워크플로. type 값이 박혀 있다."""
+    inputs = {"type": "lumina2"}
+    for i in range(1, count + 1):
+        inputs[f"clip_name{i if count > 1 else ''}"] = f"clip{i}.safetensors"
+    return {cls: {"class_type": cls, "inputs": inputs}}
+
+
+def test_clip_type_is_inferred_from_the_loader_node():
+    """CLIP 로더 옆의 type 입력을 조작 대상에 넣는다.
+
+    회귀 근거: 이게 없으면 '어떤 CLIP 인지' 를 바꿀 수 없었다.
+    (Flux 는 flux, Z-Image 는 lumina2, Qwen 은 qwen_image)
+    """
+    spec = infer_parameters(_clip_loader_prompt())["clip_type"]
+    assert spec.input == "type"
+    assert spec.kind == "choice", "파일 목록이 아니라 선택지형이다"
+    assert spec.default == "lumina2", "워크플로에 박힌 값을 기본으로 둔다"
+    assert spec.node_class == "CLIPLoader", "선택지 조회에 노드 종류가 필요하다"
+
+
+def test_clip_type_uses_the_multi_clip_loader_node():
+    prompt = {
+        "10": {"class_type": "DualCLIPLoader", "inputs": {
+            "clip_name1": "a.safetensors", "clip_name2": "b.safetensors",
+            "type": "flux",
+        }},
+        # 값만 있고 실제로 쓰이지 않는 로더는 뒤로 밀려나야 한다
+        "11": {"class_type": "CLIPLoader", "inputs": {
+            "clip_name": "c.safetensors", "type": "stable_diffusion",
+        }},
+    }
+    specs = infer_parameters(prompt)
+    assert specs["clip_type"].node == "10", "실제로 쓰이는 쪽이어야 한다"
+    assert specs["clip_type"].node_class == "DualCLIPLoader"
+    assert specs["clip_type"].default == "flux"
+
+
+def test_clip_type_is_absent_without_a_clip_loader():
+    """CLIP 로더가 없으면 칸도 없다. (예: CheckpointLoader 만 쓰는 SD)"""
+    prompt = {
+        "1": {"class_type": "CheckpointLoaderSimple",
+              "inputs": {"ckpt_name": "sd.safetensors", "type": "안쓰임"}},
+    }
+    assert "clip_type" not in infer_parameters(prompt)
+
+
+def test_clip_type_is_absent_when_type_is_linked():
+    """type 이 다른 노드와 연결돼 있으면 값을 고를 수 없다."""
+    prompt = {
+        "1": {"class_type": "CLIPLoader",
+              "inputs": {"clip_name": "a.safetensors", "type": ["9", 0]}},
+    }
+    assert "clip_type" not in infer_parameters(prompt)
+
+
+def test_input_of_maps_numbered_clip_slots():
+    """회귀: CLIP 2~4개 워크플로의 선택이 조용히 버려졌다.
+
+    위젯 키는 clip1~clip4 이고 ComfyUI 입력 이름은 clip_name1~clip_name4 다.
+    대응표에 없어 그대로 돌려주면 워크플로에서 아무것도 찾지 못했다.
+    """
+    assert input_of("clip1") == "clip_name1"
+    assert input_of("clip2") == "clip_name2"
+    assert input_of("clip4") == "clip_name4"
+    assert input_of("clip_type") == "type"
+    # clip5 처럼 대응표에 없는 번호도 규칙대로 붙는다
+    assert input_of("clip5") == "clip_name5"
+
+
+def test_multi_clip_and_type_selections_reach_the_request():
+    """고른 CLIP 파일과 타입이 실제 파라미터 키로 전달된다."""
+    prompt = {
+        "10": {"class_type": "DualCLIPLoader", "inputs": {
+            "clip_name1": "a.safetensors", "clip_name2": "b.safetensors",
+            "type": "flux",
+        }},
+    }
+    specs = infer_parameters(prompt)
+    extra = collect_extra(specs, {
+        "clip1": "new1.safetensors",
+        "clip2": "new2.safetensors",
+        "clip_type": "sdxl",
+    })
+    assert extra == {
+        "clip1": "new1.safetensors",
+        "clip2": "new2.safetensors",
+        "clip_type": "sdxl",
+    }

@@ -301,19 +301,32 @@ class ComfyClient:
             result[key] = _extract_options(inputs.get(field))
         return result
 
-    async def get_clip_types(self) -> list[str]:
-        """CLIPLoader 의 type 입력 선택지 (qwen_image, flux, lumina2 …).
+    async def get_input_options(
+        self, node_class: str, input_name: str
+    ) -> list[str]:
+        """노드 하나가 받는 선택지 목록 (열거형 입력).
 
         노드 하나만 조회한다. /object_info 전체는 노드 1000종이 넘어
         2MB 라 0.6KB 로 줄일 수 있다.
         (실측: 전체 87ms/2.4MB → 한 종류 0.6ms/1.2KB)
+
+        Returns:
+            list[str]: 선택지. 해당 입력이 없거나 열거형이 아니면 빈 목록.
         """
-        info = await self.get_object_info("CLIPLoader")
-        node = info.get("CLIPLoader") if isinstance(info, dict) else None
+        info = await self.get_object_info(node_class)
+        node = info.get(node_class) if isinstance(info, dict) else None
         if not isinstance(node, dict):
             return []
-        spec = ((node.get("input") or {}).get("required") or {}).get("type")
-        return _input_options(spec)
+        required = (node.get("input") or {}).get("required") or {}
+        return _input_options(required.get(input_name))
+
+    async def get_clip_types(self) -> list[str]:
+        """CLIPLoader 의 type 입력 선택지 (qwen_image, flux, lumina2 …).
+
+        CLIPLoader 만 읽는다. CLIP 로더는 여럿이고 type 선택지가 서로
+        다르므로 나머지는 get_input_options 로 노드 종류를 따로 읽는다.
+        """
+        return await self.get_input_options("CLIPLoader", "type")
 
     # --- 실행 API (v0.2 §4.2, §4.3) -----------------------------
 

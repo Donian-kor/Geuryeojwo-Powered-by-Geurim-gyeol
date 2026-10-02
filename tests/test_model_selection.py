@@ -248,6 +248,8 @@ SD_OPTIONS = {
     "vae": [],
     "loras": [],
 }
+# CLIP 로더의 type 선택지. (실제 ComfyUI 는 노드 종류마다 다르다)
+CLIP_TYPE_OPTIONS = ["qwen_image", "lumina2", "sdxl", "flux"]
 
 
 @pytest.fixture
@@ -438,10 +440,12 @@ def test_model_combos_are_aligned_and_label_column_is_narrow(qapp):
 
 # --- CLIP 2~4개인 워크플로 (Flux / SD3 / Hunyuan) ------------------------
 
-def _clip_workflow(clip_class: str, count: int) -> dict:
+def _clip_workflow(clip_class: str, count: int, clip_type: str = "") -> dict:
     """clip_name1..N 을 가진 워크플로를 만든다."""
     inputs = {f"clip_name{i + 1}": f"clip{i + 1}.safetensors"
               for i in range(count)}
+    if clip_type:
+        inputs["type"] = clip_type
     return {
         "1": {"class_type": "UNETLoader",
               "inputs": {"unet_name": "u.safetensors"}},
@@ -471,7 +475,8 @@ def _show(window, prompt):
         path=Path("메모리.json"), name="메모리", description="",
         output_node="", prompt=prompt, parameters=specs,
     )
-    window._setup_models(specs, {})
+    # 워크플로 기본값도 넘긴다. 목록이 비었을 때 그것으로 칸을 채운다.
+    window._setup_models(specs, window.engine.active_workflow.defaults())
     return window
 
 
@@ -486,6 +491,9 @@ def _plain_window(qapp):
 
     ComfyClient.get_system_info = _fake
     GeurimGyeolEngine.model_options = lambda self: dict(SD_OPTIONS)
+    GeurimGyeolEngine.input_options = (
+        lambda self, node_class, input_name: list(CLIP_TYPE_OPTIONS)
+    )
     GeurimGyeolEngine.sampler_options = (
         lambda self: {"sampler": ["euler"], "scheduler": ["normal"]}
     )
@@ -638,3 +646,70 @@ def test_enhancer_row_hidden_when_injection_impossible(qapp):
         )
     finally:
         window.close()
+
+
+# --- CLIP 로더의 type --------------------------------------------------
+
+def test_clip_type_row_appears_next_to_the_clip_files(qapp):
+    """CLIP 종류를 고르는 칸이 CLIP 파일 칸 바로 뒤에 있어야 한다.
+
+    회귀: '어떤 CLIP 인지'(lumina2/flux/qwen_image)는 고를 수단이 없었다.
+    """
+    window = _plain_window(qapp)
+    try:
+        window._comfy_input_options = {"DualCLIPLoader": list(CLIP_TYPE_OPTIONS)}
+        _show(window, _clip_workflow("DualCLIPLoader", 2, clip_type="flux"))
+        _show_model_tab(qapp, window)
+        assert "clip_type" in window.model_combos, "CLIP 타입 칸이 없다"
+        keys = list(window.model_combos)
+        assert keys.index("clip_type") == keys.index("clip2") + 1, (
+            f"CLIP 칸 바로 뒤여야 한다: {keys}"
+        )
+        combo = window.model_combos["clip_type"]
+        assert combo.currentText() == "flux", "워크플로에 박힌 값을 보여야 한다"
+        assert combo.isEnabled()
+        assert combo.count() == len(CLIP_TYPE_OPTIONS)
+    finally:
+        window.close()
+
+
+def test_clip_type_row_absent_when_node_has_no_type_input(qapp):
+    """type 입력이 없는 워크플로에는 칸이 없어야 한다."""
+    window = _plain_window(qapp)
+    try:
+        _show(window, _clip_workflow("DualCLIPLoader", 2))
+        _show_model_tab(qapp, window)
+        assert "clip_type" not in window.model_combos
+    finally:
+        window.close()
+
+
+def test_chosen_clip_type_and_files_reach_the_request(qapp):
+    """고른 타입과 CLIP 파일이 실제 파라미터 키로 넘어가야 한다.
+
+    회귀: clip1~clip4 와 clip_type 은 위젯 키와 ComfyUI 입력 이름이 달라
+    대응표에 없었고, 그 결과 선택이 조용히 버려졌다.
+    """
+    window = _plain_window(qapp)
+    try:
+        window._comfy_input_options = {"DualCLIPLoader": list(CLIP_TYPE_OPTIONS)}
+        # 실제로 고를 수 있게 설치된 CLIP 목록을 채운다
+        window._comfy_models = {
+            **SD_OPTIONS,
+            "text_encoders": [
+                "clip1.safetensors", "clip2.safetensors", "새_CLIP_1.safetensors",
+            ],
+        }
+        _show(window, _clip_workflow("DualCLIPLoader", 2, clip_type="flux"))
+        _show_model_tab(qapp, window)
+
+        window.model_combos["clip_type"].setCurrentText("sdxl")
+        window.model_combos["clip1"].setCurrentText("새_CLIP_1.safetensors")
+        extra = window._collect_extra()
+
+        assert extra["clip_type"] == "sdxl"
+        assert extra["clip1"] == "새_CLIP_1.safetensors"
+        assert extra["clip2"] == "clip2.safetensors", "CLIP 2 도 넘어가야 한다"
+    finally:
+        window.close()
+

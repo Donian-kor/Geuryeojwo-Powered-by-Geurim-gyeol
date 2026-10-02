@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,9 @@ class ParameterSpec:
     kind: str = "text"  # text | int | float | combo
     choices: list[str] = field(default_factory=list)
     default: Any = None
+    # 이 입력을 가진 노드 종류. 선택지 목록을 물어볼 때 쓴다.
+    # (예: DualCLIPLoader 의 type — CLIPLoader 와 목록이 다르다)
+    node_class: str = ""
 
     @property
     def display_label(self) -> str:
@@ -94,17 +98,36 @@ class Workflow:
         return f"{self.name} — {self.description}" if self.description else self.name
 
 
+# 노드 정의에서 선택지를 읽어 오는 열거형 입력의 kind.
+# 'combo' 와 따로 둔다. sampler_name·scheduler 도 combo 지만 그건
+# 샘플러 영역의 전용 위젯이 따로 있어 Models 칸에 다시 뜨면 안 된다.
+_ENUM_KIND = "choice"
+
 # GUI 위젯 키 -> ComfyUI 입력 이름
 WIDGET_KEY_TO_INPUT = {
     "unet": "unet_name", "checkpoint": "ckpt_name", "clip": "clip_name",
     "vae": "vae_name", "lora": "lora_name",
     "sampler": "sampler_name", "scheduler": "scheduler",
+    # CLIP 로더의 type. 모델 파일이 아니라 '이 모델이 쓰는 CLIP 종류' 다.
+    "clip_type": "type",
 }
 
 
 def input_of(widget_key: str) -> str:
-    """GUI 위젯 키에 대응하는 ComfyUI 입력 이름을 돌려준다."""
-    return WIDGET_KEY_TO_INPUT.get(widget_key, widget_key)
+    """GUI 위젯 키에 대응하는 ComfyUI 입력 이름을 돌려준다.
+
+    회귀 근거: Dual/Triple/Quadruple CLIPLoader 는 위젯 키가 clip1~clip4 이고
+    입력 이름은 clip_name1~clip_name4 다. 대응표에 없어 그대로 돌려주면
+    워크플로에서 아무것도 찾지 못해 선택한 값이 조용히 버려졌다.
+    (칸은 있는데 고른 값이 반영되지 않았다)
+    """
+    mapped = WIDGET_KEY_TO_INPUT.get(widget_key)
+    if mapped:
+        return mapped
+    match = re.fullmatch(r"clip(\d+)", widget_key)
+    if match:
+        return f"clip_name{match.group(1)}"
+    return widget_key
 
 
 def model_folder(params: dict, key: str) -> str:
@@ -234,9 +257,27 @@ def load_workflow(path: Path) -> Workflow | None:
         description=data.get("description", ""),
         output_node=str(data.get("output_node", "")),
         prompt=prompt,
-        parameters=_parse_parameters(data.get("parameters", {})),
+        parameters=_merge_parameters(
+            _parse_parameters(data.get("parameters", {})), prompt
+        ),
         meta=meta,
     )
+
+
+def _merge_parameters(saved: dict, prompt: dict) -> dict:
+    """저장된 parameters 맵에 없는 항목만 새로 추론해 보탠다.
+
+    parameters 는 워크플로에서 파생되는 값이라 파일에 저장은 되지만
+    프로그램이 늘어난 항목이 담기지 않는다. (예: CLIP 타입 칸은 나중에
+    추가됐다) 저장은 유지한 채 빠진 것만 채우면 예전 워크플로도
+    새 기능의 칸이 생기고, 손으로 고친 값은 그대로 남는다.
+    """
+    if not saved:
+        return infer_parameters(prompt)
+    merged = dict(saved)
+    for key, spec in infer_parameters(prompt).items():
+        merged.setdefault(key, spec)
+    return merged
 
 
 def list_workflows(directory: Path) -> list[Path]:
@@ -515,6 +556,33 @@ def infer_parameters(prompt: dict) -> dict[str, ParameterSpec]:
         node_id = _pick_loader(candidates, prompt, sampler_nodes)
         specs[key] = ParameterSpec(
             key, node_id, input_name, label, f"model:{folder}"
+        )
+
+    # 5-3) CLIP 로더의 type 입력
+    #      텍스트 인코더가 여러 개인 모델은 type 이 걸려 있다.
+    #      (Flux 는 flux, Z-Image 는 lumina2, Qwen 은 qwen_image)
+    #      워크플로에 박힌 값만으로는 선택지를 알 수 없다. 노드마다 목록이
+    #      다르므로(CLIPLoader 30개, DualCLIPLoader 12개) 여기서는 노드 종류만
+    #      기억해 두고 목록은 화면이 engine.input_options() 로 물어본다.
+    #
+    #      CLIP 로더가 둘 이상이면 하나만 고른다. 실제로 쓰이는 쪽을 따른다.
+    clip_type_candidates = []
+    for node_id, node in prompt.items():
+        inputs = node.get("inputs") or {}
+        if not any(k.startswith("clip_name") for k in inputs):
+            continue          # CLIP 로더가 아니다
+        value = inputs.get("type")
+        if not isinstance(value, str) or not value.strip():
+            continue          # type 이 없거나, 다른 노드와 연결돼 있다
+        clip_type_candidates.append(node_id)
+    if clip_type_candidates:
+        node_id = _pick_loader(clip_type_candidates, prompt, sampler_nodes)
+        node = prompt.get(node_id) or {}
+        inputs = node.get("inputs") or {}
+        specs["clip_type"] = ParameterSpec(
+            "clip_type", node_id, "type", "CLIP 타입", _ENUM_KIND,
+            default=inputs.get("type"),
+            node_class=node.get("class_type", ""),
         )
     return specs
 

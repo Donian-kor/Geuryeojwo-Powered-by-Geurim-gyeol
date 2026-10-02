@@ -29,11 +29,19 @@ from app.comfy.workflow import infer_parameters
 class _StubClient:
     """목록 조회만 흉내내는 ComfyClient 대체."""
 
-    def __init__(self, clip=None, nodes=None, fail=False):
+    def __init__(self, clip=None, nodes=None, fail=False, per_class=None):
         self.clip = ["qwen_image", "flux2"] if clip is None else clip
+        # 노드 종류별 선택지. (CLIPLoader 와 DualCLIPLoader 는 다르다)
+        self.per_class = per_class or {}
         self.nodes = {"KSampler": {}, "SaveImage": {}} if nodes is None else nodes
         self.fail = fail
         self.calls = {"clip": 0, "nodes": 0}
+
+    async def get_input_options(self, node_class, input_name="type"):
+        self.calls["clip"] += 1
+        if self.fail:
+            raise RuntimeError("서버 꺼짐")
+        return list(self.per_class.get(node_class, self.clip))
 
     async def get_clip_types(self):
         self.calls["clip"] += 1
@@ -109,7 +117,7 @@ def test_clip_types_cache_expires(tmp_path):
     stub = _StubClient()
     engine = _engine(tmp_path, stub)
     engine.clip_types()
-    engine._clip_types_at = 0.0        # 유효 시간 경과
+    engine._input_options_cache["CLIPLoader.type"] = (0.0, ["qwen_image", "flux2"])
     engine.clip_types()
     assert stub.calls["clip"] == 2
 
@@ -1243,3 +1251,65 @@ def test_enhancer_model_omitted_keeps_installed_default(enhancer_engine, monkeyp
         n for n in payload.values() if _is_enhancer(n.get("class_type"))
     ]
     assert injected[0]["inputs"]["local_model"] == "pe.gguf"
+
+
+def test_input_options_are_cached_per_node_class(tmp_path):
+    """회귀: CLIP 로더마다 type 선택지가 다른데 한 목록을 나누어 썼다.
+
+    실측 — CLIPLoader 는 29개(qwen_image, lumina2 …),
+    DualCLIPLoader 는 12개(sdxl, flux, hunyuan_video …).
+    """
+    stub = _StubClient(per_class={
+        "CLIPLoader": ["qwen_image", "lumina2"],
+        "DualCLIPLoader": ["sdxl", "flux"],
+    })
+    engine = _engine(tmp_path, stub)
+
+    assert engine.input_options("CLIPLoader", "type") == ["qwen_image", "lumina2"]
+    assert engine.input_options("DualCLIPLoader", "type") == ["sdxl", "flux"]
+    # 다시 불러도 캐시를 쓴다
+    engine.input_options("DualCLIPLoader", "type")
+    assert stub.calls["clip"] == 2, "노드 종류마다 한 번만 조회해야 한다"
+
+
+def test_clip_types_uses_the_shared_option_lookup(tmp_path):
+    """clip_types() 는 CLIPLoader 조회로 위임할 뿐이다."""
+    stub = _StubClient()
+    engine = _engine(tmp_path, stub)
+    assert engine.clip_types() == engine.input_options("CLIPLoader", "type")
+    assert stub.calls["clip"] == 1, "같은 조회를 두 번 하면 안 된다"
+
+
+def test_saved_parameters_gain_specs_added_later(tmp_path):
+    """예전에 저장된 워크플로에도 새로 늘어난 파라미터가 채워진다.
+
+    회귀: parameters 는 파일에 저장이 되므로, 프로그램이 나중에 추가한
+    항목(CLIP 타입 칸)이 담기지 않은 채 남는다. 그래서 예전 워크플로를
+    골라도 칸이 안 보였다. 저장은 유지한 채 빠진 것만 채운다.
+    """
+    from app.comfy.workflow import load_workflow
+
+    prompt = {
+        "10": {"class_type": "DualCLIPLoader", "inputs": {
+            "clip_name1": "a.safetensors", "clip_name2": "b.safetensors",
+            "type": "flux",
+        }},
+    }
+    # 예전 형식: clip 만 저장돼 있고 clip_type 은 없다
+    path = tmp_path / "old.json"
+    path.write_text(json.dumps({
+        "name": "예전 워크플로",
+        "prompt": prompt,
+        "parameters": {
+            "clip1": {
+                "name": "clip1", "node": "10", "input": "clip_name1",
+                "label": "텍스트 인코더 1", "kind": "model:text_encoders",
+            },
+        },
+    }), encoding="utf-8")
+
+    wf = load_workflow(path)
+    assert "clip_type" in wf.parameters, "새로 늘어난 파라미터가 없다"
+    assert wf.parameters["clip_type"].default == "flux"
+    # 저장돼 있던 항목은 그대로여야 한다
+    assert wf.parameters["clip1"].label == "텍스트 인코더 1"
