@@ -81,8 +81,13 @@ class Workflow:
                 continue
             node = self.prompt.get(spec.node) or {}
             value = (node.get("inputs") or {}).get(spec.input)
-            if not isinstance(value, list):
-                result[key] = value
+            if isinstance(value, list):
+                # 상수 노드로 연결된 경우 그 값을 대신 읽는다.
+                # 계산값이면 임의로 추정하지 않고 아예 넣지 않는다.
+                value = resolve_constant(self.prompt, value)
+                if value is None:
+                    continue
+            result[key] = value
         return result
 
     def describe(self) -> str:
@@ -265,6 +270,15 @@ _SAMPLER_INPUTS = (
     "seed", "steps", "cfg", "denoise", "sampler_name", "scheduler",
 )
 
+# 링크를 따라가도 값을 그대로 읽을 수 있는 '상수 노드'.
+# 사용자가 숫자/문자열을 직접 넣은 노드로, 계산된 값이 아니다.
+_CONSTANT_NODES = frozenset((
+    "PrimitiveInt", "PrimitiveFloat", "PrimitiveString",
+    "PrimitiveStringMultiline", "Int", "Float", "String",
+))
+# 상수 노드가 값을 담는 입력 이름.
+_CONSTANT_INPUTS = ("value", "string", "text")
+
 
 def infer_parameters(prompt: dict) -> dict[str, ParameterSpec]:
     """parameters 맵이 없는 워크플로에서 조작할 파라미터를 찾는다.
@@ -291,6 +305,19 @@ def infer_parameters(prompt: dict) -> dict[str, ParameterSpec]:
     # 2) 실제로 쓰이는 샘플러 노드 찾기
     sampler_nodes = _find_sampler_nodes(prompt)
 
+    # 2-1) 샘플러 negative 에 '만' 연결된 노드는 프롬프트 후보에서 뺀다.
+    #      positive 프롬프트가 인핸서 체인처럼 링크로 들어오면 후보가 남아 있지
+    #      않은데, 그럴 때 네거티브 노드가 positive 로 잘못 잡혔다.
+    #      (ERNIE 워크플로: 74 는 positive 로만, 75 는 negative 로만 연결됨)
+    only_negative = (
+        _sampler_sources(prompt, sampler_nodes, "negative")
+        - _sampler_sources(prompt, sampler_nodes, "positive")
+    )
+    if only_negative:
+        prompt_candidates = [
+            c for c in prompt_candidates if c[0] not in only_negative
+        ]
+
     specs: dict[str, ParameterSpec] = {}
 
     # 3) 프롬프트: KSampler positive 로 흘러들어가는 쪽을 우선
@@ -305,12 +332,18 @@ def infer_parameters(prompt: dict) -> dict[str, ParameterSpec]:
         is_sampler = node_id in sampler_nodes
 
         for input_name, value in inputs.items():
-            # 연결(링크) 값과 모델 파일 선택은 제외
-            if isinstance(value, list) or input_name in _MODEL_INPUTS:
+            # 모델 파일 선택은 5단계에서 따로 다룬다
+            if input_name in _MODEL_INPUTS:
                 continue
             # 프롬프트는 위에서 처리
             if input_name in _TEXT_INPUTS:
                 continue
+            # 연결(링크) 값은 건너뛴다. 단, 상수 노드로 이어진 경우
+            # 그 값을 그대로 읽을 수 있으므로 조작 대상으로 남긴다.
+            # (예: PrimitiveInt(123:110) -> EmptyLatentImage.width)
+            if isinstance(value, list):
+                if resolve_constant(prompt, value) is None:
+                    continue
             if input_name == "negative_prompt":
                 specs["negative"] = ParameterSpec(
                     "negative", node_id, input_name, "네거티브 프롬프트", "text"
@@ -354,6 +387,49 @@ def _upstream(node_id: str, prompt: dict) -> list[str]:
                 and isinstance(value[0], str) and value[0] in prompt):
             result.append(value[0])
     return result
+
+
+def _sampler_sources(prompt: dict, sampler_nodes: set[str], name: str) -> set[str]:
+    """샘플러의 name 입력에 직접 연결된 노드 ID 집합."""
+    result: set[str] = set()
+    for node_id in sampler_nodes:
+        value = ((prompt.get(node_id) or {}).get("inputs") or {}).get(name)
+        if (isinstance(value, list) and len(value) == 2
+                and isinstance(value[0], str) and value[0] in prompt):
+            result.add(value[0])
+    return result
+
+
+def resolve_constant(prompt: dict, value: Any, depth: int = 4) -> Any:
+    """링크(["12", 0] 형태)를 따라가 상수 노드가 담은 값을 읽는다.
+
+    ERNIE 워크플로는 크기를 PrimitiveInt 로 빼내 둔다.
+    (EmptyLatentImage.width = ["123:110", 0]) 링크를 그냥 건너뛰면
+    해상도를 전혀 못 읽는다. 반대로 아무 값이나 추정하면 안 되므로
+    '사용자가 직접 넣은 상수 노드' 에 연결된 경우에만 읽는다.
+    나머지(계산된 값)는 None 을 돌려 호출자가 건너뛴다.
+    """
+    for _ in range(depth):
+        if not isinstance(value, list) or len(value) != 2:
+            return None
+        node = prompt.get(value[0])
+        if not isinstance(node, dict):
+            return None
+        if node.get("class_type") not in _CONSTANT_NODES:
+            return None
+        inputs = node.get("inputs") or {}
+        for name in _CONSTANT_INPUTS:
+            if name not in inputs:
+                continue
+            inner = inputs[name]
+            if not isinstance(inner, list):
+                return inner
+            # 상수 노드끼리 연결돼 있으면 그 노드를 계속 따라간다.
+            value = inner
+            break
+        else:
+            return None
+    return None
 
 
 def _find_sampler_nodes(prompt: dict) -> set[str]:
