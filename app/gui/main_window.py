@@ -12,7 +12,9 @@ from PySide6.QtWidgets import (
 from app.comfy.workflow import (
     collect_extra, installed_models, missing_models,
 )
-from app.engine.comfy_engine import GeurimGyeolEngine, _is_enhancer
+from app.engine.comfy_engine import (
+    GeurimGyeolEngine, _find_enhancer_node, injection_block_reason,
+)
 from app.engine.health import (
     UsageLevel, cpu_level, format_usage, gpu_level, ram_level, vram_level,
 )
@@ -65,10 +67,11 @@ class ComfyInfoWorker(QThread):
     그만큼 멈춘다 (ComfyUI 가 꺼져 있으면 연결 실패로 수 초,
     자동 실행 대기라면 launch_wait_seconds 만큼).
 
-    세 가지를 한 번에 모아 emit 하므로 요청이 늘어나지 않는다.
+    네 가지를 한 번에 모아 emit 하므로 요청이 늘어나지 않는다.
     """
 
-    fetched = Signal(object, object, object)  # SystemInfo, models, samplers
+    # SystemInfo, models, samplers, enhancer_status
+    fetched = Signal(object, object, object, object)
 
     def __init__(self, engine, allow_launch: bool = True):
         super().__init__()
@@ -79,7 +82,8 @@ class ComfyInfoWorker(QThread):
         info = self.engine.refresh_status(allow_launch=self.allow_launch)
         models = self.engine.model_options()
         samplers = self.engine.sampler_options()
-        self.fetched.emit(info, models, samplers)
+        enhancer = self.engine.enhancer_status()
+        self.fetched.emit(info, models, samplers, enhancer)
 
 
 def _describe_parameters(parameters: dict) -> str:
@@ -338,6 +342,8 @@ class MainWindow(QWidget):
         self.engine.refresh_workflows()
         self._info_worker=None
         self._comfy_models={}; self._comfy_samplers={}
+        # (사용 가능 여부, 안내 문구) — 백그라운드 조회 결과가 채운다
+        self._enhancer_status=None
         self.theme_manager=ThemeManager(QApplication.instance(), ROOT / "config" / "theme_config.json"); self.theme_manager.apply_theme()
         self.build_ui(); self.refresh_models()
 
@@ -521,9 +527,16 @@ class MainWindow(QWidget):
         self.prompt.setMinimumHeight(90); pl.addWidget(self.prompt)
         # 프롬프트 인핸서 — ComfyUI 안의 LLM 노드가 프롬프트를 다듬는다.
         # 느릴 수 있어 끌 수 있어야 한다.
+        # 워크플로에 노드가 없어도 프로그램이 자동 추가하므로,
+        # 준비가 안 됐을 때만 아래 경고로 알린다.
         self.enhance=QCheckBox("프롬프트 인핸서 사용 (더 정확해지지만 느림)")
         self.enhance.setChecked(True)
+        self.enhance.toggled.connect(self._update_enhancer_warning)
         pl.addWidget(self.enhance)
+        self.enhancer_warning=QLabel(""); self.enhancer_warning.setVisible(False)
+        self.enhancer_warning.setWordWrap(True)
+        self.enhancer_warning.setStyleSheet("color:#d9534f; font-size:11px;")
+        pl.addWidget(self.enhancer_warning)
         left.addWidget(promptbox)
 
         params=QGroupBox("Generation"); pv=QVBoxLayout(params); pv.setSpacing(4)
@@ -800,12 +813,13 @@ class MainWindow(QWidget):
         self._info_worker.fetched.connect(self._on_info_fetched)
         self._info_worker.start()
 
-    def _on_info_fetched(self, info, models, samplers) -> None:
+    def _on_info_fetched(self, info, models, samplers, enhancer=None) -> None:
         """ComfyUI 조회가 끝난 뒤(GUI 스레드) 위젯에 반영한다."""
         if self._closing: return
         self.engine.system_info = info
         self._comfy_models = models or {}
         self._comfy_samplers = samplers or {}
+        self._enhancer_status = enhancer
 
         self.comfy_label.setText(self.engine.status_text())
         self.comfy_label.setStyleSheet(
@@ -934,14 +948,55 @@ class MainWindow(QWidget):
     def _setup_enhancer(self, params: dict, defaults: dict) -> None:
         """프롬프트 인핸서 스위치를 워크플로에 맞춘다.
 
-        인핸서 노드가 없는 워크플로에서는 의미가 없으므로 숨긴다.
+        인핸서 노드가 없어도 프로그램이 직접 추가할 수 있으므로,
+        예전처럼 '노드가 없으면 숨김' 으로 처리하지 않는다.
+        대신 붙일 수 없는 경우에는 스위치를 끄고 이유를 툴팁으로 보인다.
+        (조용히 사라지면 사용자는 왜 안 되는지 알 수 없다)
         """
-        has_enhancer = any(
-            _is_enhancer((node.get("class_type") or ""))
-            for node in (self.engine.active_workflow.prompt or {}).values()
-            if isinstance(node, dict)
-        )
-        self.enhance.setVisible(has_enhancer)
+        wf = self.engine.active_workflow
+        if wf is None:
+            self.enhance.setVisible(False)
+            return
+
+        self.enhance.setVisible(True)
+
+        if _find_enhancer_node(wf.prompt) is not None:
+            self.enhance.setEnabled(True)
+            self.enhance.setToolTip(
+                "워크플로에 포함된 LLM 노드가 프롬프트를 다듬습니다."
+            )
+        else:
+            reason = injection_block_reason(wf)
+            if reason:
+                self.enhance.setChecked(False)
+                self.enhance.setEnabled(False)
+                self.enhance.setToolTip(reason)
+            else:
+                self.enhance.setEnabled(True)
+                self.enhance.setToolTip(
+                    "워크플로에 인핸서 노드가 없어 생성할 때 자동으로 추가합니다."
+                )
+        self._update_enhancer_warning()
+
+    def _update_enhancer_warning(self, *_args) -> None:
+        """인핸서를 켰는데 준비가 안 된 경우 상태바에 경고를 띄운다.
+
+        노드나 GGUF 모델이 없으면 ComfyUI 가 생성 자체를 거부하므로
+        조용히 원본 프롬프트로 생성하면 사용자는 이유를 알 수 없다.
+        """
+        if not self.enhance.isVisible() or not self.enhance.isEnabled():
+            self.enhancer_warning.setVisible(False)
+            return
+        if not self.enhance.isChecked():
+            self.enhancer_warning.setVisible(False)
+            return
+
+        ok, message = self._enhancer_status or (False, "확인되지 않음")
+        if ok:
+            self.enhancer_warning.setVisible(False)
+            return
+        self.enhancer_warning.setText(f"⚠ 프롬프트 인핸서: {message}")
+        self.enhancer_warning.setVisible(True)
 
     def _setup_models(self, params: dict, defaults: dict,
                       preserve_selection: bool = False) -> None:

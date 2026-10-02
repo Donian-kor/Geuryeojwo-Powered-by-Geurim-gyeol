@@ -31,6 +31,24 @@ _ENHANCER_TYPES = ("PromptEnhance", "PromptEnhancer", "PromptExpander")
 # 그 문자열은 워크플로마다 한국어 표현이 달라 파싱할 수 없다.
 # 그래서 "값이 채워져 있는 첫 번째" 를 모델명으로 기록한다.
 _ENHANCER_MODEL_INPUTS = ("custom_model", "local_model", "ai_workshop_model")
+# 인핸서 노드가 없는 워크플로에 자동으로 넣을 때 쓸 노드 종류.
+# 앞의 것부터 확인하고, ComfyUI 에 설치된 첫 번째를 쓴다.
+_ENHANCER_INJECT_CLASSES = (
+    "QwenImage21PromptEnhancerT8",
+    "MiniMaxH3PromptEnhancerT8",
+    "Seedance20PromptEnhancerT8",
+)
+# 인핸서가 여러 백엔드(온라인 API / OpenAI 호환 / 로컬 GGUF) 중에서
+# 고를 때, 이 표시가 있는 항목을 우선한다.
+# 노드 자체의 기본값은 '온라인 상점' 이라 API 키가 없으면 실패한다.
+# 이 프로그램은 로컬 GGUF 전제로 만들어졌으므로 그쪽을 고른다.
+# 표기가 언어와 무관하게 고르려고 'GGUF' 라는 문자열로 찾는다.
+_ENHANCER_LOCAL_MODE_MARK = "gguf"
+# 텍스트 인코더에서 "사용자 프롬프트" 를 받는 입력 이름.
+# Flux(clip_l/t5xxl) · SD3(clip_l/clip_g/t5xxl) 처럼 인코더가 여러 개인
+# 모델은 여기 걸리지 않으므로 자동으로 붙지 않는다.
+# 어느 인코더에 붙여야 할지는 워크플로마다 달라 프로그램이 정할 수 없다.
+_PROMPT_TEXT_INPUTS = ("text", "prompt", "positive", "user_prompt")
 
 
 def _is_enhancer(class_type: str) -> bool:
@@ -38,11 +56,93 @@ def _is_enhancer(class_type: str) -> bool:
     return any(marker in class_type for marker in _ENHANCER_TYPES)
 
 
+def _find_enhancer_node(prompt: dict) -> str | None:
+    """인핸서 노드의 ID 를 찾는다. 없으면 None."""
+    for node_id, node in (prompt or {}).items():
+        if isinstance(node, dict) and _is_enhancer(node.get("class_type", "")):
+            return node_id
+    return None
+
+
+def _prompt_text_inputs(node: dict) -> list[str]:
+    """노드가 가진 프롬프트 문자열 입력 이름들 (링크가 아닌 값만)."""
+    inputs = node.get("inputs") or {}
+    return [
+        name for name in _PROMPT_TEXT_INPUTS
+        if isinstance(inputs.get(name), str)
+    ]
+
+
+def injection_target(wf: Workflow) -> tuple[str, str] | None:
+    """인핸서를 붙일 (노드 ID, 입력 이름) 을 찾는다.
+
+    워크플로에 인핸서가 이미 있으면 붙일 곳이 없으므로 None.
+    프롬프트 문자열 입력이 '정확히 하나' 인 텍스트 인코더만 대상으로 한다.
+    SDXL(text_g/text_l) 처럼 둘 이상이면 어느 쪽에 붙여야 하는지
+    워크플로마다 달라 판단할 수 없으므로 넣지 않는다.
+
+    Returns:
+        tuple[str, str] | None: 붙일 자리, 없으면 None
+    """
+    if wf is None or _find_enhancer_node(wf.prompt) is not None:
+        return None
+    spec = wf.parameters.get("positive")
+    if spec is None:
+        return None
+    node = (wf.prompt or {}).get(spec.node)
+    if not isinstance(node, dict) or _is_enhancer(node.get("class_type", "")):
+        return None
+    if _prompt_text_inputs(node) != [spec.input]:
+        return None
+    return spec.node, spec.input
+
+
+def injection_block_reason(wf: Workflow) -> str:
+    """자동 추가가 안 되는 이유를 문장으로 돌려준다. 가능하면 빈 문자열.
+
+    GUI 가 스위치를 끄면서 사유를 보여줄 때 쓴다.
+    """
+    if wf is None:
+        return "워크플로가 없습니다."
+    if _find_enhancer_node(wf.prompt) is not None:
+        return ""
+    spec = wf.parameters.get("positive")
+    if spec is None:
+        return (
+            "이 워크플로에서 프롬프트를 받는 노드를 찾지 못했습니다. "
+            "텍스트 인코더 노드가 필요합니다."
+        )
+    node = (wf.prompt or {}).get(spec.node)
+    if not isinstance(node, dict):
+        return f"노드 {spec.node} 을(를) 찾을 수 없습니다."
+    count = len(_prompt_text_inputs(node))
+    if count == 0:
+        return (
+            f"{spec.node} 노드는 프롬프트를 직접 받지 않습니다. "
+            "텍스트 인코더 노드가 필요합니다."
+        )
+    if count > 1:
+        return (
+            f"{spec.node} 노드에 프롬프트 입력이 {count}개 있어 어디에 "
+            "연결할지 결정할 수 없습니다. 워크플로 JSON 에 직접 지정하세요."
+        )
+    return ""
+
+
+def _free_node_id(prompt: dict) -> str:
+    """워크플로와 겹치지 않는 인핸서 노드 ID 를 만든다."""
+    index = 1
+    while f"prompt_enhancer_{index}" in (prompt or {}):
+        index += 1
+    return f"prompt_enhancer_{index}"
+
+
 def _enhancer_model(payload: dict) -> str | None:
     """실제로 실행된 인핸서의 LLM 모델명을 payload 에서 읽는다.
 
     인핸서 스위치를 끈 경우 _bypass_enhancer 가 노드를 payload 에서
     지우므로 인핸서를 찾을 수 없고 None 이 나온다.
+    붙일 자리가 없어 자동 추가에 실패한 경우도 마찬가지로 None 이다.
     None 은 "LLM 이 안 돌았다" 는 뜻이므로 그대로 기록하면 된다.
 
     Returns:
@@ -118,6 +218,10 @@ class GeurimGyeolEngine:
         # 이 프로그램이 직접 띄운 ComfyUI 프로세스 (자동 실행 시에만 채워짐)
         self._launched_process = None
 
+        # 인핸서 노드 정의 캐시 (ComfyUI 에 물어본 결과).
+        # 워크플로에 없는 노드를 직접 만들어 넣을 때만 필요하다.
+        self._enhancer_defaults: tuple[str | None, dict, dict] | None = None
+
         # ComfyUI 통신용 이벤트 루프를 하나만 두고 재사용한다.
         # (GUI 스레드와 QThread 워커가 함께 쓸 수 있으므로 직렬화한다)
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -151,6 +255,7 @@ class GeurimGyeolEngine:
     def initialize(self) -> None:
         """워크플로 목록을 읽고 ComfyUI 접속을 확인한다."""
         self.refresh_workflows()
+        self._enhancer_defaults = None
         self.refresh_status()
 
     def shutdown(self) -> None:
@@ -160,6 +265,7 @@ class GeurimGyeolEngine:
             self._run(self.client.close())
         except Exception:
             pass
+        self._enhancer_defaults = None
         self._close_loop()
 
     # --- ComfyUI 상태 -----------------------------------------------
@@ -419,9 +525,143 @@ class GeurimGyeolEngine:
 
         # 프롬프트 인핸서 우회 (GUI 의 스위치가 꺼져 있으면)
         payload = wf.apply(values)
-        if not request.enhance_prompt:
+        if request.enhance_prompt:
+            self._ensure_enhancer(wf, payload)
+        else:
             payload = self._bypass_enhancer(payload)
         return wf, payload
+
+    def enhancer_defaults(self) -> tuple[str | None, dict, dict]:
+        """설치된 인핸서 노드 종류와 그 입력 기본값을 돌려준다.
+
+        워크플로에 인핸서 노드를 직접 만들어 넣을 때 쓴다.
+        매번 조회하면 매번 HTTP 가 되므로 결과를 캐시한다.
+
+        Returns:
+            tuple[str | None, dict, dict]:
+                (노드 class_type, 필수 입력 기본값, LLM 모델 지정값).
+                노드가 하나도 설치돼 있지 않으면 (None, {}, {}).
+        """
+        if self._enhancer_defaults is not None:
+            return self._enhancer_defaults
+        found: tuple[str | None, dict, dict] = (None, {}, {})
+        if self.online:
+            for node_class in _ENHANCER_INJECT_CLASSES:
+                defaults = self._run(self.client.get_node_defaults(node_class))
+                if not defaults:
+                    continue
+                # LLM 모델 지정값은 '선택' 입력이므로 object_info 기본값이
+                # 아니라 '설치된 것 중 첫 번째' 를 써야 한다.
+                model_inputs: dict[str, Any] = {}
+                for key in _ENHANCER_MODEL_INPUTS:
+                    options = self._run(
+                        self.client.get_node_options(node_class, key)
+                    )
+                    if options:
+                        model_inputs[key] = options[0]
+                # GGUF 가 실제로 깔려 있으면 로컬 백엔드를 고른다.
+                # 안 고르면 노드 기본값(온라인 API)이 들어가는데,
+                # 이 프로그램에는 API 키가 없어서 그대로 실패한다.
+                if "local_model" in model_inputs and "api_mode" in defaults:
+                    modes = self._run(
+                        self.client.get_node_options(node_class, "api_mode")
+                    )
+                    for mode in modes:
+                        if _ENHANCER_LOCAL_MODE_MARK in str(mode).lower():
+                            defaults = {**defaults, "api_mode": mode}
+                            break
+                found = (node_class, defaults, model_inputs)
+                break
+        self._enhancer_defaults = found
+        return found
+
+    def enhancer_status(self) -> tuple[bool, str]:
+        """인핸서를 쓸 수 있는지와 안 되면 이유를 돌려준다.
+
+        Returns:
+            tuple[bool, str]: (가능 여부, 안내 문구)
+        """
+        node_class, defaults, model_inputs = self.enhancer_defaults()
+        if node_class is None:
+            return False, (
+                "프롬프트 인핸서 노드가 설치돼 있지 않습니다 "
+                "(ComfyUI 의 T8 팩이 필요합니다)."
+            )
+        if not model_inputs.get("local_model"):
+            return False, (
+                "인핸서용 GGUF 모델이 설치돼 있지 않습니다 "
+                "(ComfyUI 모델 폴더에 GGUF 파일이 필요합니다)."
+            )
+        return True, f"인핸서 사용 가능 ({node_class})"
+
+    def _ensure_enhancer(self, wf: Workflow, payload: dict) -> None:
+        """인핸서 노드가 없으면 실행 그래프에 직접 추가한다.
+
+        워크플로에 이미 있으면 아무것도 하지 않는다.
+        추가하지 못하면 원본 프롬프트로 그대로 생성한다 —
+        조용히 LLM 을 돌릴 수는 없으므로, 못 넣는 게 맞아 보인다.
+
+        Returns:
+            None
+        """
+        if _find_enhancer_node(payload) is not None:
+            return
+        target = injection_target(wf)
+        if target is None:
+            self.logger.warning(
+                "%s: 인핸서를 붙일 자리가 없어 원본 프롬프트로 생성합니다 (%s)",
+                wf.name, injection_block_reason(wf),
+            )
+            return
+        node_class, defaults, model_inputs = self.enhancer_defaults()
+        if node_class is None:
+            self.logger.warning(
+                "%s: 인핸서 노드가 설치돼 있지 않아 원본 프롬프트로 생성합니다",
+                wf.name,
+            )
+            return
+        self._inject_enhancer(
+            wf, payload, node_class, defaults, model_inputs, *target
+        )
+
+    def _inject_enhancer(
+        self,
+        wf: Workflow,
+        payload: dict,
+        node_class: str,
+        defaults: dict,
+        model_inputs: dict,
+        node_id: str,
+        input_name: str,
+    ) -> bool:
+        """payload 에 인핸서 노드를 추가해 프롬프트 경로에 끼워 넣는다.
+
+        텍스트 인코더의 문자열 입력을 인핸서로 옮기고, 그 자리를
+        인핸서 출력 0번(rewritten_prompt) 링크로 바꾼다.
+
+        Returns:
+            bool: 주입에 성공했으면 True
+        """
+        node = payload.get(node_id) or {}
+        original = (node.get("inputs") or {}).get(input_name)
+        if not isinstance(original, str) or not original.strip():
+            return False
+
+        new_id = _free_node_id(payload)
+        inputs = dict(defaults)
+        inputs.update(model_inputs)
+        inputs["prompt"] = original
+        payload[new_id] = {
+            "inputs": inputs,
+            "class_type": node_class,
+            "_meta": {"title": "프롬프트 인핸서 (자동 추가)"},
+        }
+        node.setdefault("inputs", {})[input_name] = [new_id, 0]
+        self.logger.info(
+            "%s: 인핸서 %s 를 %s.%s 앞에 자동으로 연결했습니다",
+            wf.name, node_class, node_id, input_name,
+        )
+        return True
 
     def _bypass_enhancer(self, payload: dict) -> dict:
         """프롬프트 인핸서 노드를 건너뛰도록 payload 를 고친다.

@@ -269,7 +269,7 @@ def test_model_info_has_two_sections(qapp):
     w = MainWindow()
     try:
         _show_model_tab(w)
-        app.processEvents()
+        qapp.processEvents()
         texts = [t for _, _, t in _label_geometry(w.model_info)]
         assert "워크플로" in texts
         assert "서버" in texts
@@ -291,7 +291,7 @@ def test_model_info_labels_do_not_overlap(qapp):
     try:
         _show_model_tab(w)
         for _ in range(3):
-            app.processEvents()
+            qapp.processEvents()
         rows = _label_geometry(w.model_info)
         for (top1, h1, t1), (top2, h2, t2) in zip(rows, rows[1:]):
             if top1 == top2:
@@ -314,7 +314,7 @@ def test_model_info_is_much_shorter_than_before(qapp):
     try:
         _show_model_tab(w)
         for _ in range(3):
-            app.processEvents()
+            qapp.processEvents()
         h = w.model_info.height()
         assert h < 320, f"패널이 {h}px 로 다시 늘었다 (예전 403px)"
     finally:

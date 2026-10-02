@@ -21,7 +21,7 @@ import asyncio
 import json
 import uuid
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 import httpx
 
@@ -219,6 +219,46 @@ class ComfyClient:
             return response.json()
         except ComfyUIError:
             return {}
+
+    async def get_node_defaults(self, node_class: str) -> dict[str, Any]:
+        """노드의 필수 입력 기본값을 전부 읽는다.
+
+        워크플로에 없는 노드를 프로그램이 직접 만들어 넣을 때 쓴다.
+        필수 입력을 비워 넣으면 ComfyUI 가 그 노드를 거부하므로
+        object_info 에 적힌 기본값을 그대로 채워야 한다.
+
+        COMBO 는 '선언된 기본값' 이 아니라 '설치된 선택지' 를 쓴다.
+        선언 기본값이 목록에 없으면(모델을 안 깐 경우) ComfyUI 가 실패한다.
+
+        Returns:
+            dict[str, Any]: 입력 이름 -> 넣을 값. 노드가 없으면 빈 dict.
+        """
+        info = await self.get_object_info(node_class)
+        node = info.get(node_class) if isinstance(info, dict) else None
+        if not isinstance(node, dict):
+            return {}
+        required = ((node.get("input") or {}).get("required") or {})
+        defaults: dict[str, Any] = {}
+        for name, spec in required.items():
+            value = _input_default(spec)
+            if value is not None:
+                defaults[name] = value
+        return defaults
+
+    async def get_node_options(self, node_class: str, input_name: str) -> list[str]:
+        """노드의 선택지 목록 (설치된 값만 들어있다).
+
+        자유 입력(STRING)인 입력은 선택지가 없으므로 빈 리스트를 돌려준다.
+        """
+        info = await self.get_object_info(node_class)
+        node = info.get(node_class) if isinstance(info, dict) else None
+        if not isinstance(node, dict):
+            return []
+        inputs = node.get("input") or {}
+        required = inputs.get("required") or {}
+        optional = inputs.get("optional") or {}
+        spec = required.get(input_name) or optional.get(input_name)
+        return _input_options(spec)
 
     async def get_queue(self) -> dict:
         """GET /queue — 대기열 상태."""
@@ -500,6 +540,48 @@ def _extract_options(spec) -> list[str]:
             if key in spec:
                 return _extract_options(spec[key])
     return []
+
+
+def _input_options(spec) -> list[str]:
+    """object_info 의 입력 정의에서 '선택지 목록' 만 뽑는다.
+
+    ComfyUI 의 정의 형태가 두 가지라 _extract_options 를 그대로 쓰면 안 된다.
+    - [["euler", ...], {...}]  (KSampler) → 첫 항목이 리스트
+    - ["COMBO", {"options": [...]}]  (T8 팩) → 첫 항목이 타입 문자열
+    두 번째 형태에 _extract_options 를 쓰면 ["COMBO", "{...}"] 처럼
+    타입 이름과 딕셔너리를 문자열로 돌려준다. 그래서 COMBO 만 받아들이고,
+    STRING 같은 자유 입력은 빈 리스트로 처리한다.
+    """
+    if not isinstance(spec, list) or not spec:
+        return []
+    kind = spec[0] if isinstance(spec[0], str) else None
+    if kind is not None:
+        if kind != "COMBO":
+            return []
+        return _extract_options(spec[1] if len(spec) > 1 else None)
+    return _extract_options(spec)
+
+
+def _input_default(spec):
+    """object_info 의 입력 정의에서 넣을 기본값 하나를 뽑는다.
+
+    - COMBO: 설치된 선택지(options) 중 선언된 기본값, 없으면 첫 번째
+    - STRING/INT/FLOAT/BOOLEAN: 선언된 default
+    값을 얻을 수 없으면 None 을 돌려준다 (호출자가 그 입력은 빼게 된다).
+    """
+    if not isinstance(spec, list) or not spec:
+        return None
+    kind = spec[0] if isinstance(spec[0], str) else ""
+    options = _extract_options(spec[1] if len(spec) > 1 else None)
+    declared = spec[1].get("default") if (
+        len(spec) > 1 and isinstance(spec[1], dict)
+    ) else None
+
+    if kind == "COMBO" or (not kind and options):
+        if isinstance(declared, str) and declared in options:
+            return declared
+        return options[0] if options else None
+    return declared
 
 
 def _extract_images(history: dict, prompt_id: str) -> list[dict]:
