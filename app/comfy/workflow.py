@@ -316,18 +316,56 @@ _KIND_MAP = {
     "strength_model": "float", "strength_clip": "float",
     "sampler_name": "combo", "scheduler": "combo",
 }
-_MODEL_INPUTS = ("unet_name", "ckpt_name", "clip_name", "vae_name", "lora_name")
+# ComfyUI 0.38.1 의 모든 모델 선택 입력 이름 -> 폴더 (object_info 전수 조사).
+# clip_name 은 1개(CLIPLoader), clip_name1~4 는 2~4개(Flux/SD3/Hunyuan/…).
+# 폭이 넓은 모델일수록 CLIP 이 여러 개다.
 _MODEL_FOLDERS = {
-    "unet_name": "diffusion_models", "ckpt_name": "checkpoints",
-    "clip_name": "text_encoders", "vae_name": "vae", "lora_name": "loras",
+    "ckpt_name": "checkpoints",       # CheckpointLoader, ImageOnlyCheckpointLoader …
+    "unet_name": "diffusion_models",  # UNETLoader, UnetLoaderGGUF
+    "clip_name": "text_encoders",     # CLIPLoader, CLIPLoaderGGUF
+    "clip_name1": "text_encoders",    # Dual/Triple/Quadruple CLIPLoader
+    "clip_name2": "text_encoders",
+    "clip_name3": "text_encoders",
+    "clip_name4": "text_encoders",
+    "text_encoder": "text_encoders",  # LTXAVTextEncoderLoader
+    "vae_name": "vae",
+    "lora_name": "loras",             # LoraLoader, LoraLoaderModelOnly …
+    "existing_lora": "loras",         # Lora Manager 계열
+    "config_name": "configs",         # CheckpointLoader
+}
+_MODEL_INPUTS = tuple(_MODEL_FOLDERS)
+# 폴더를 '입력 이름' 만으로 정할 수 없는 경우. 노드 종류로 구분한다.
+#
+# model_name 하나를 서로 다른 노드가 서로 다른 폴더로 쓴다.
+#   UpscaleModelLoader.model_name -> models/upscale_models/  (4x-UltraSharp 같은 업스케일러)
+#   SAMLoader.model_name         -> models/sam/             (sam_vit 같은 세그먼트 모델)
+# 이름만 보고 고르면 엉뚱한 목록이 나온다. (업스케일 칸에 SAM 모델이 뜬다)
+# 여기에도 없으면 애초에 다루지 않는다. 추측해서 틀린 값을 보여주는 게 낫다.
+_MODEL_FOLDERS_BY_NODE = {
+    "UpscaleModelLoader": ("model_name", "upscale_models"),
+    "SAMLoader": ("model_name", "sam"),
+    "SAMLoaderCombined": ("model_name", "sam"),
+}
+# 노드 종류 -> (파라미터 키, 화면 라벨)
+_NODE_LABELS = {
+    "UpscaleModelLoader": ("upscale_model", "업스케일 모델"),
+    "SAMLoader": ("sam_model", "SAM 모델"),
+    "SAMLoaderCombined": ("sam_model", "SAM 모델"),
 }
 # 파라미터 키 -> (키, 화면 라벨)
 _MODEL_LABELS = {
-    "lora_name": ("lora", "LoRA"),
-    "unet_name": ("unet", "확산 모델"),
     "ckpt_name": ("checkpoint", "체크포인트"),
+    "unet_name": ("unet", "확산 모델"),
     "clip_name": ("clip", "텍스트 인코더"),
+    "clip_name1": ("clip1", "텍스트 인코더 1"),
+    "clip_name2": ("clip2", "텍스트 인코더 2"),
+    "clip_name3": ("clip3", "텍스트 인코더 3"),
+    "clip_name4": ("clip4", "텍스트 인코더 4"),
+    "text_encoder": ("text_encoder", "텍스트 인코더"),
     "vae_name": ("vae", "VAE"),
+    "lora_name": ("lora", "LoRA"),
+    "existing_lora": ("existing_lora", "기존 LoRA"),
+    "config_name": ("config", "설정 파일"),
 }
 
 # 프롬프트를 실제로 "받아" 다음 노드로 넘기는 노드.
@@ -452,6 +490,22 @@ def infer_parameters(prompt: dict) -> dict[str, ParameterSpec]:
         specs[key] = ParameterSpec(
             key, node_id, input_name, label,
             f"model:{_MODEL_FOLDERS[input_name]}",
+        )
+
+    # 5-2) 입력 이름만으로는 폴더를 알 수 없는 경우 (노드 종류로 구분)
+    for node_class, (input_name, folder) in _MODEL_FOLDERS_BY_NODE.items():
+        key, label = _NODE_LABELS[node_class]
+        candidates = [
+            node_id for node_id, node in prompt.items()
+            if node.get("class_type") == node_class
+            and not isinstance((node.get("inputs") or {}).get(input_name), list)
+            and (node.get("inputs") or {}).get(input_name)
+        ]
+        if not candidates:
+            continue
+        node_id = _pick_loader(candidates, prompt, sampler_nodes)
+        specs[key] = ParameterSpec(
+            key, node_id, input_name, label, f"model:{folder}"
         )
     return specs
 

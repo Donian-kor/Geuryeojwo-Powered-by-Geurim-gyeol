@@ -289,6 +289,54 @@ def test_model_slot_labels_unchanged():
     assert specs["unet"].kind == "model:diffusion_models"
 
 
+# --- 5. 폴더를 노드 종류로 구분 ---------------------------------------
+
+def _two_model_name_workflow() -> dict:
+    """model_name 을 서로 다른 폴더로 쓰는 노드가 함께 있는 워크플로."""
+    return {
+        "1": {"class_type": "CheckpointLoaderSimple",
+              "inputs": {"ckpt_name": "realvisxl.safetensors"}},
+        "2": {"class_type": "UpscaleModelLoader",
+              "inputs": {"model_name": "4x-UltraSharp.pth"}},
+        "3": {"class_type": "SAMLoader",
+              "inputs": {"model_name": "sam_vit_b.pth"}},
+        "4": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": "고양이", "clip": ["1", 1]}},
+        "5": {"class_type": "EmptyLatentImage",
+              "inputs": {"width": 512, "height": 512, "batch_size": 1}},
+        "6": {"class_type": "KSampler",
+              "inputs": {"seed": 1, "steps": 20, "cfg": 7.0,
+                         "sampler_name": "euler", "scheduler": "normal",
+                         "denoise": 1, "model": ["1", 0],
+                         "positive": ["4", 0], "latent_image": ["5", 0]}},
+        "7": {"class_type": "VAEDecode",
+              "inputs": {"samples": ["6", 0], "vae": ["1", 2]}},
+        "8": {"class_type": "SaveImage", "inputs": {"images": ["7", 0]}},
+        "9": {"class_type": "UpscaleImage",
+              "inputs": {"upscale_model": ["2", 0], "image": ["8", 0]}},
+    }
+
+
+def test_same_input_name_resolves_by_node_class():
+    """회귀: model_name 은 노드에 따라 폴더가 다르다.
+
+    이름만 보고 하나를 고르면 업스케일 칸에 SAM 모델이 뜨거나 그 반대다.
+    """
+    specs = infer_parameters(_two_model_name_workflow())
+    assert specs["upscale_model"].kind == "model:upscale_models"
+    assert specs["sam_model"].kind == "model:sam"
+    assert specs["upscale_model"].node == "2"
+    assert specs["sam_model"].node == "3"
+
+
+def test_ambiguous_input_name_is_never_guessed():
+    """아무 규칙에도 없으면 만들지 않는다. 추측해서 틀린 폴더를 더 낫다."""
+    prompt = {"1": {"class_type": "ImageEncodeUtennx",
+                    "inputs": {"model_name": "whatever.pth"}}}
+    specs = infer_parameters(prompt)
+    assert not any(str(v.kind).startswith("model:") for v in specs.values())
+
+
 def _load(prompt: dict) -> Workflow:
     return Workflow(path=None, name="t", description="", output_node="",
                     prompt=prompt, parameters=infer_parameters(prompt))

@@ -12,8 +12,8 @@ from __future__ import annotations
 
 from app.comfy.check import (
     LEVEL_BLOCK, LEVEL_INFO, LEVEL_OK, LEVEL_WARN, check_fitness, check_format,
-    check_models, check_nodes, check_workflow, nodes_without_class_type,
-    output_nodes, required_models, similar_models,
+    check_models, check_nodes, check_workflow, folder_of,
+    nodes_without_class_type, output_nodes, required_models, similar_models,
 )
 
 INSTALLED = {
@@ -166,6 +166,37 @@ def test_no_model_verdict_when_list_unavailable():
 
 def test_no_model_requirement_returns_none():
     assert check_models({"9": {"class_type": "SaveImage", "inputs": {}}}, INSTALLED) is None
+
+
+# --- 폴더를 노드 종류로 구분 -------------------------------------------
+
+def test_folder_of_prefers_input_name():
+    node = {"class_type": "CheckpointLoaderSimple"}
+    assert folder_of(node, "ckpt_name") == "checkpoints"
+
+
+def test_folder_of_falls_back_to_node_class():
+    """model_name 은 이름만으 안 되고 노드 종류로 갈린다."""
+    assert folder_of({"class_type": "UpscaleModelLoader"}, "model_name") == "upscale_models"
+    assert folder_of({"class_type": "SAMLoader"}, "model_name") == "sam"
+
+
+def test_folder_of_returns_empty_when_unknown():
+    """모르면 빈 문자열. 추측해서 엉뚱한 폴더를 안내하지 않는다."""
+    assert folder_of({"class_type": "ImageEncodeUtennx"}, "model_name") == ""
+
+
+def test_required_models_separates_same_named_inputs():
+    """같은 model_name 이 서로 다른 폴더로 갈려야 한다."""
+    prompt = {
+        "2": {"class_type": "UpscaleModelLoader",
+              "inputs": {"model_name": "4x-UltraSharp.pth"}},
+        "3": {"class_type": "SAMLoader",
+              "inputs": {"model_name": "sam_vit_b.pth"}},
+    }
+    found = required_models(prompt)
+    assert found == {"upscale_models": ["4x-UltraSharp.pth"],
+                     "sam": ["sam_vit_b.pth"]}
 
 
 # --- 4) 적합성 ----------------------------------------------------------

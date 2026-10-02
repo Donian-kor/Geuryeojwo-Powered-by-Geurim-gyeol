@@ -21,7 +21,7 @@ import difflib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .workflow import _MODEL_FOLDERS, _MODEL_INPUTS
+from .workflow import _MODEL_FOLDERS, _MODEL_FOLDERS_BY_NODE, _MODEL_INPUTS
 
 # HuggingFace 모델 검색. 파일명만 알아도 받을 파일을 찾을 수 있다.
 _HF_SEARCH = "https://huggingface.co/models?search={}"
@@ -199,7 +199,26 @@ _FOLDER_LABEL = {
     "vae": "VAE",
     "loras": "LoRA",
     "upscale_models": "업스케일 모델",
+    "configs": "설정 파일",
+    "sam": "SAM 모델",
 }
+
+
+def folder_of(node: dict, name: str) -> str:
+    """이 노드의 이 입력이 어느 폴더를 가리키는지 돌려준다. 모르면 빈 문자열.
+
+    입력 이름만으로 정해지지 않으면 노드 종류를 본다.
+    (model_name 은 업스케일러와 SAM 이 서로 다른 폴더를 쓴다)
+    아무것도 없으면 빈 문자열을 돌려 '판단 보류' 가 되게 한다.
+    추측해서 엉뚱한 폴더를 안내하는 게 낫다.
+    """
+    folder = _MODEL_FOLDERS.get(name)
+    if folder is not None:
+        return folder
+    entry = _MODEL_FOLDERS_BY_NODE.get(node.get("class_type"))
+    if entry and entry[0] == name:
+        return entry[1]
+    return ""
 
 
 def required_models(prompt: dict) -> dict[str, list[str]]:
@@ -207,11 +226,14 @@ def required_models(prompt: dict) -> dict[str, list[str]]:
     result: dict[str, list[str]] = {}
     for node in (prompt or {}).values():
         for name, value in ((node or {}).get("inputs") or {}).items():
-            if name in _MODEL_INPUTS and isinstance(value, str) and value:
-                folder = _MODEL_FOLDERS[name]
-                result.setdefault(folder, [])
-                if value not in result[folder]:
-                    result[folder].append(value)
+            if not isinstance(value, str) or not value:
+                continue
+            folder = folder_of(node, name)
+            if not folder:
+                continue
+            result.setdefault(folder, [])
+            if value not in result[folder]:
+                result[folder].append(value)
     return result
 
 
