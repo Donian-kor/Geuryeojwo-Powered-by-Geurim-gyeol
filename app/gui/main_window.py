@@ -514,6 +514,16 @@ class MainWindow(QWidget):
         box.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         return box
 
+    def _on_advanced_toggled(self, checked: bool) -> None:
+        """고급 설정 열기/닫기.
+
+        기본으로 감춰 두는 이유: 워크플로 JSON 안에 이미 그 모델에 맞는
+        값이 들어 있다. (스텝·CFG·샘플러를 제작자가 맞춰둔 값) 손댈
+        대상이 없다는 뜻이며, 화면에 다 내밀면 오히려 고를 게 많아 보인다.
+        """
+        self.advanced.setVisible(checked)
+        self.advanced_btn.setText("고급 닫기" if checked else "고급")
+
     def _build_model_tab(self) -> QWidget:
         """Model 탭 — 등록된 워크플로 전체 목록, 모델 파일, 워크플로 요약.
 
@@ -725,7 +735,11 @@ class MainWindow(QWidget):
 
         promptbox=QGroupBox("Prompt"); pl=QVBoxLayout(promptbox)
         self.prompt=QTextEdit(); self.prompt.setPlaceholderText("무엇을 그리고 싶나요?")
-        self.prompt.setMinimumHeight(90); pl.addWidget(self.prompt)
+        self.prompt.setMinimumHeight(90)
+        # 남는 세로 공간을 프롬프트가 다 먹으면 아래 값들이 화면 밖으로 밀린다.
+        # 큰 상한을 두고 아래 여백으로 보정한다.
+        self.prompt.setMaximumHeight(220)
+        pl.addWidget(self.prompt)
         # 프롬프트 인핸서 — ComfyUI 안의 LLM 노드가 프롬프트를 다듬는다.
         # 느릴 수 있어 끌 수 있어야 한다.
         # 워크플로에 노드가 없어도 프로그램이 자동 추가하므로,
@@ -733,12 +747,16 @@ class MainWindow(QWidget):
         self.enhance=QCheckBox("프롬프트 인핸서 사용 (더 정확해지지만 느림)")
         self.enhance.setChecked(True)
         self.enhance.toggled.connect(self._update_enhancer_warning)
-        pl.addWidget(self.enhance)
         self.enhancer_warning=QLabel(""); self.enhancer_warning.setVisible(False)
         self.enhancer_warning.setWordWrap(True)
         self.enhancer_warning.setStyleSheet("color:#d9534f; font-size:11px;")
-        pl.addWidget(self.enhancer_warning)
         left.addWidget(promptbox)
+
+        # 네거티브는 프롬프트 바로 아래에 둔다.
+        # 결과물을 크게 바꾸는 항목이라 기본으로 보여야 한다.
+        self.neg=QTextEdit(); self.neg.setPlaceholderText("Negative prompt (선택)")
+        self.neg.setFixedHeight(46)
+        left.addWidget(self.neg)
 
         params=QGroupBox("Generation"); pv=QVBoxLayout(params); pv.setSpacing(4)
         pf=QHBoxLayout(); pf.setSpacing(4)
@@ -754,40 +772,53 @@ class MainWindow(QWidget):
             lbl=QLabel(caption); lbl.setStyleSheet("color:#a0a0a0; font-size:11px;")
             box.addWidget(lbl); box.addWidget(widget); return box
 
-        for cap, wdg in (("W",self.w),("H",self.h),("Steps",self.steps),("CFG",self.cfg),("Seed",self.seed)):
+        # 기본으로 손댈 수 있는 값만 둔다. (W/H·스케줄러·LoRA 강도는 '고급')
+        self.sampler=QComboBox(); self.sampler.setMinimumWidth(120)
+        for cap, wdg in (("Steps",self.steps),("CFG",self.cfg),
+                         ("Seed",self.seed),("KSampler",self.sampler)):
             pf.addLayout(_field(cap,wdg))
         pv.addLayout(pf)
 
-        # Sampler / Scheduler — ComfyUI 가 목록을 알려준다 (KSampler 기준)
-        self.sampler=QComboBox(); self.sampler.setMinimumWidth(120)
+        # Scheduler — ComfyUI 가 목록을 알려준다 (KSampler 기준)
         self.scheduler=QComboBox(); self.scheduler.setMinimumWidth(120)
-        sampler_row=QHBoxLayout(); sampler_row.setSpacing(4)
-        sampler_row.addWidget(QLabel("Sampler")); sampler_row.addWidget(self.sampler,1)
-        sampler_row.addWidget(QLabel("Scheduler")); sampler_row.addWidget(self.scheduler,1)
-        pv.addLayout(sampler_row)
 
-        # LoRA 강도 — 별도 프레임이 아니라 Generation 프레임 안에 둔다.
-        # LoRA 가 여러 개면 줄도 여러 개가 된다. (_setup_lora_strength 가 만든다)
+        # LoRA 강도 — LoRA 가 여러 개면 줄도 여러 개가 된다.
+        # (_setup_lora_strength 가 만든다)
         # 워크플로에 strength_model 입력이 없으면 이 묶음 전체를 숨긴다.
         self.lora_box=QWidget()
         self._lora_rows=QVBoxLayout(self.lora_box)
         self._lora_rows.setSpacing(2); self._lora_rows.setContentsMargins(0,0,0,0)
         self._lora_sliders: list[tuple[str, QLabel, QSlider]] = []
-        pv.addWidget(self.lora_box)
 
         left.addWidget(params)
 
-        self.neg=QTextEdit(); self.neg.setPlaceholderText("Negative prompt (선택)")
-        self.neg.setFixedHeight(46)
-        left.addWidget(self.neg)
+        # --- 고급 설정 -----------------------------------------------------
+        # 워크플로 JSON 안에 이미 그 모델에 맞는 값이 들어 있다. (스텝·CFG·
+        # 샘플러를 제작자가 맞춰둔 값) 그래서 기본값은 감춰 두고, 필요한
+        # 사람만 연다. 대다수 사용자는 손댈 일이 없다.
+        self.advanced=QGroupBox("고급"); av=QVBoxLayout(self.advanced); av.setSpacing(4)
+        af=QHBoxLayout(); af.setSpacing(4)
+        for cap, wdg in (("W",self.w),("H",self.h),("Scheduler",self.scheduler)):
+            af.addLayout(_field(cap,wdg))
+        av.addLayout(af)
+        av.addWidget(self.lora_box)
+        av.addWidget(self.enhance)
+        av.addWidget(self.enhancer_warning)
+        self.advanced.setVisible(False)
+        left.addWidget(self.advanced)
 
         buttons=QHBoxLayout()
         self.generate=QPushButton("그려줘"); self.cancel=QPushButton("중지")
         self.refresh=QPushButton("새로고침")
-        buttons.addWidget(self.generate); buttons.addWidget(self.cancel); buttons.addWidget(self.refresh)
+        self.advanced_btn=QPushButton("고급"); self.advanced_btn.setCheckable(True)
+        self.advanced_btn.toggled.connect(self._on_advanced_toggled)
+        buttons.addWidget(self.generate); buttons.addWidget(self.cancel)
+        buttons.addWidget(self.refresh); buttons.addWidget(self.advanced_btn)
         left.addLayout(buttons)
         self.progress=QProgressBar(); left.addWidget(self.progress)
         self.status=QLabel("준비됨"); left.addWidget(self.status)
+        # 여백을 아래로 밀어 값들이 위에서부터 정돈되게 한다.
+        left.addStretch()
 
         self.log=QTextEdit(); self.log.setReadOnly(True)
         right.addWidget(QLabel("Result"))

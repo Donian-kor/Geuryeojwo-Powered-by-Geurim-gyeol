@@ -348,7 +348,8 @@ def test_switch_stays_enabled_and_explains_auto_add(qapp, tmp_path, monkeypatch)
     eng = _engine(tmp_path, monkeypatch, SINGLE_TEXT_WORKFLOW)
     window = _window(eng, qapp, monkeypatch, tmp_path)
     try:
-        window.enhance.setVisible(True)
+        # 인함서 스위치는 '고급' 안에 있다. 사용자가 여는 경로를 그대로 따른다.
+        window.advanced_btn.setChecked(True)
         window._setup_enhancer({}, {})
         assert window.enhance.isVisible() is True
         assert window.enhance.isEnabled() is True
@@ -375,6 +376,7 @@ def test_warning_appears_when_gguf_missing(qapp, tmp_path, monkeypatch):
     eng = _engine(tmp_path, monkeypatch, SINGLE_TEXT_WORKFLOW, local_models=())
     window = _window(eng, qapp, monkeypatch, tmp_path)
     try:
+        window.advanced_btn.setChecked(True)
         window._setup_enhancer({}, {})
         window._enhancer_status = (False, "인함서용 GGUF 모델이 설치돼 있지 않습니다.")
         window._update_enhancer_warning()

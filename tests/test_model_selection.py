@@ -101,6 +101,12 @@ def make_window(qapp, tmp_path, monkeypatch, project_root):
             GeurimGyeolEngine, "model_options",
             lambda self: dict(FAKE_OPTIONS),
         )
+        # CLIP 타입 선택지도 서버를 부른다. 이러지 않으면 테스트가 실제
+        # ComfyUI 에 접속해 결과가 서버 상태에 따라 달라진다.
+        monkeypatch.setattr(
+            GeurimGyeolEngine, "input_options",
+            lambda self, node_class, input_name: ["qwen_image", "lumina2"],
+        )
         monkeypatch.setattr(
             GeurimGyeolEngine, "sampler_options",
             lambda self: {"sampler": ["euler"], "scheduler": ["normal"]},
@@ -295,6 +301,12 @@ def make_sd_window(qapp, tmp_path, monkeypatch, project_root):
         monkeypatch.setattr(ComfyClient, "get_system_info", _fake_system_info)
         monkeypatch.setattr(
             GeurimGyeolEngine, "model_options", lambda self: dict(SD_OPTIONS)
+        )
+        # CLIP 타입 선택지도 서버를 부른다. 이러지 않으면 테스트가 실제
+        # ComfyUI 에 접속해 결과가 서버 상태에 따라 달라진다.
+        monkeypatch.setattr(
+            GeurimGyeolEngine, "input_options",
+            lambda self, node_class, input_name: list(CLIP_TYPE_OPTIONS),
         )
         monkeypatch.setattr(
             GeurimGyeolEngine, "sampler_options",
@@ -817,3 +829,61 @@ def test_each_lora_file_and_strength_reaches_its_own_node(qapp):
     finally:
         window.close()
 
+# --- Generate 탭: 기본은 최소한으로 ---------------------------------
+
+def test_advanced_settings_are_hidden_by_default(qapp):
+    """대부분의 사용자는 손댈 대상이 없다. 워크플로 값이 이미 최적값이다."""
+    window = _plain_window(qapp)
+    try:
+        assert window.advanced.isHidden(), "고급 설정이 기본으로 떠 있다"
+        assert window.advanced_btn.text() == "고급"
+        assert window.advanced_btn.isChecked() is False
+    finally:
+        window.close()
+
+
+def test_advanced_button_reveals_the_rest(qapp):
+    window = _plain_window(qapp)
+    try:
+        window.advanced_btn.setChecked(True)
+        qapp.processEvents()
+        assert not window.advanced.isHidden()
+        assert window.advanced_btn.text() == "고급 닫기"
+        # 감춘 항목이 정말 고급 안에 있는지 확인한다
+        for widget in (window.w, window.h, window.scheduler,
+                       window.lora_box, window.enhance):
+            parent = widget.parent()
+            while parent is not None and parent is not window.advanced:
+                parent = parent.parent()
+            assert parent is window.advanced, "고급 안의 항목이 아니다"
+
+        window.advanced_btn.setChecked(False)
+        qapp.processEvents()
+        assert window.advanced.isHidden()
+    finally:
+        window.close()
+
+
+def test_generate_tab_shows_only_the_essentials(qapp):
+    """스텝·CFG·KSampler·시드·프롬프트·네거티브만 기본으로 보여야 한다."""
+    window = _plain_window(qapp)
+    try:
+        window.show()
+        qapp.processEvents()
+        from PySide6.QtCore import QPoint
+        from PySide6.QtWidgets import QTabWidget
+
+        tab = window.findChild(QTabWidget).widget(0)
+        point = QPoint(0, 0)
+
+        def top_of(widget):
+            return widget.mapTo(tab, point).y()
+
+        # 순서: 프롬프트 -> 네거티브 -> 값들
+        assert top_of(window.prompt) < top_of(window.neg)
+        assert top_of(window.neg) < top_of(window.steps)
+        assert top_of(window.steps) < top_of(window.generate)
+        # 프롬프트가 화면을 다 먹지 않아야 아래 값들이 밀려나지 않는다
+        assert window.prompt.maximumHeight() <= 260
+    finally:
+        window.close()
