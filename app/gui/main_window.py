@@ -13,10 +13,34 @@ from app.comfy.workflow import (
     collect_extra, installed_models, missing_models,
 )
 from app.engine.comfy_engine import GeurimGyeolEngine, _is_enhancer
+from app.engine.health import (
+    UsageLevel, cpu_level, format_usage, gpu_level, ram_level, vram_level,
+)
+from app.gui.gpu_usage import GpuUsageReader
 from app.gui.session_browser import HistoryBrowser
 from app.gui.theme.manager import ThemeManager
 
 ROOT = Path(__file__).resolve().parents[2]
+
+GB = 1024 ** 3
+
+# 단계별 색. 판정은 app/engine/health.py 가 하고, 색은 여기서 정한다.
+# (engine 은 PySide6 를 모르므로 색을 알 수 없다)
+_LEVEL_QSS = {
+    UsageLevel.OK: "",
+    UsageLevel.WARN: "color:#ffd93d;",
+    UsageLevel.DANGER: "color:#ff6b6b;",
+}
+
+
+def _paint_usage(label: QLabel, text: str, level: UsageLevel) -> None:
+    """상태바(와 ModelInfo) 한 칸에 글자와 단계 색을 함께 칠한다.
+
+    상태바와 ModelInfo 가 같은 판단을 보여야 하므로 색칠은 반드시 이
+    함수를 통한다. 각자 칠하면 언젠가 한쪽만 색이 어긋난다.
+    """
+    label.setText(text)
+    label.setStyleSheet(_LEVEL_QSS[level])
 
 
 class Worker(QThread):
@@ -58,6 +82,23 @@ class ComfyInfoWorker(QThread):
         self.fetched.emit(info, models, samplers)
 
 
+def _describe_parameters(parameters: dict) -> str:
+    """워크플로가 받는 파라미터 이름을 한 줄로 요약한다.
+
+    "7개" 는 사용자에게 아무 정보도 주지 않는다. 이름을 보여줘야
+    "이 워크플로로 무엇을 조절할 수 있는가" 에 답할 수 있다.
+
+    Returns:
+        파라미터가 없으면 "없음". 이름이 여럿이면 줄바꿈으로 나눈다.
+    """
+    if not parameters:
+        return "없음"
+    # label 이 없으면 spec.name 이 곧 파라미터 키다. 빈칸으로 두면 의미가 없다.
+    return "\n".join(
+        f"· {spec.label or spec.name}" for spec in parameters.values()
+    )
+
+
 class ModelInfoPanel(QGroupBox):
     """선택한 워크플로와 ComfyUI 상태 요약 (v0.2 §11).
 
@@ -73,25 +114,103 @@ class ModelInfoPanel(QGroupBox):
     def _build_ui(self) -> None:
         layout = QGridLayout(self); layout.setHorizontalSpacing(10); layout.setVerticalSpacing(1)
         self.workflow_label = QLabel("-")
+        self.description_label = QLabel("-")
         self.nodes_label = QLabel("-")
         self.params_label = QLabel("-")
         self.device_label = QLabel("-")
         self.vram_label = QLabel("-")
+        self.ram_label = QLabel("-")
+        self.comfy_label = QLabel("-")
         self.status_label = QLabel("-")
+        # 상태 줄은 _cell 을 거치지 않으므로 색만 지정한다.
+        # 글자 크기는 앱 기본 폰트를 상속받는다.
+        self.status_label.setStyleSheet("")
+        self.status_label.setWordWrap(True)
 
         def _cell(caption: str, label: QLabel, row: int, col: int) -> None:
             cap = QLabel(caption)
-            cap.setStyleSheet("color:#a0a0a0; font-size:11px;")
-            label.setStyleSheet("font-size:12px;")
+            # font-size 를 지정하지 않는다.
+            # Models 탭의 라벨처럼 앱 기본 폰트를 그대로 상속받아야
+            # 크기가 언제나 맞는다. 픽셀로 박아두면 다른 곳만 따로 커진다.
+            cap.setStyleSheet("color:#a0a0a0;")
+            # 값 라벨은 색도 지정하지 않는다 (기본 검정 유지).
+            label.setStyleSheet("")
+            # 긴 값(워크플로 파일명 등)이 잘려 옆 칸과 겹치지 않게 한다.
+            label.setWordWrap(True)
             layout.addWidget(cap, row * 2, col)
             layout.addWidget(label, row * 2 + 1, col)
 
         _cell("Workflow", self.workflow_label, 0, 0)
-        _cell("Nodes", self.nodes_label, 0, 1)
-        _cell("Parameters", self.params_label, 1, 0)
-        _cell("Device", self.device_label, 1, 1)
-        _cell("VRAM", self.vram_label, 2, 0)
-        layout.addWidget(self.status_label, 6, 0, 1, 2)
+        _cell("설명", self.description_label, 0, 1)
+        _cell("조절 가능", self.params_label, 1, 0)
+        _cell("노드", self.nodes_label, 1, 1)
+        _cell("GPU", self.device_label, 2, 0)
+        _cell("VRAM", self.vram_label, 2, 1)
+        _cell("RAM", self.ram_label, 3, 0)
+        _cell("ComfyUI", self.comfy_label, 3, 1)
+        layout.addWidget(self.status_label, 8, 0, 1, 2)
+
+    def refresh_resources(
+        self,
+        vram_used_gb: float | None = None,
+        vram_total_gb: float | None = None,
+    ) -> None:
+        """실시간 자원(RAM, VRAM)만 갱신한다.
+
+        상태바의 느린 타이머(3초)에서 부른다. 워크플로가 그대로여도
+        RAM 은 계속 오르므로, 워크플로 변경 때만 갱신하면 값이 멈춘다.
+
+        VRAM 을 인자로 받는 이유는 값의 출처를 하나로 맞추기 위해서다.
+        ComfyUI 의 system_info 는 '새로고침' 을 누를 때만 갱신되므로
+        옛 값이다. nvidia-smi 값을 그대로 넘기면 상태바와 숫자가 어긋나지 않는다.
+        """
+        try:
+            import psutil
+
+            vm = psutil.virtual_memory()
+            used_gb = (vm.total - vm.available) / GB
+            total_gb = vm.total / GB
+        except Exception:
+            _paint_usage(self.ram_label, "-", UsageLevel.OK)
+        else:
+            _paint_usage(
+                self.ram_label,
+                format_usage("", vm.percent, used_gb, total_gb),
+                ram_level(vm.percent),
+            )
+
+        if vram_used_gb is not None and vram_total_gb and vram_total_gb > 0:
+            percent = vram_used_gb / vram_total_gb * 100
+            _paint_usage(
+                self.vram_label,
+                format_usage("", percent, vram_used_gb, vram_total_gb),
+                vram_level(percent),
+            )
+        elif self.engine.system_info.online:
+            # nvidia-smi 가 없는 기기: ComfyUI 값을 그대로 쓴다
+            self._paint_vram_from_comfyui()
+
+    def _paint_vram_from_comfyui(self) -> None:
+        """nvidia-smi 가 없을 때 ComfyUI 의 마지막 조회값으로 대신한다."""
+        info = self.engine.system_info
+        used = info.vram_used_gb
+        if info.vram_total_gb and used is not None:
+            _paint_usage(
+                self.vram_label,
+                format_usage("", info.vram_percent, used, info.vram_total_gb),
+                vram_level(info.vram_percent),
+            )
+        else:
+            _paint_usage(self.vram_label, "없음", UsageLevel.OK)
+
+    def _set_status(self, text: str, color: str) -> None:
+        """상태 문구와 색을 설정한다.
+
+        font-size 는 넣지 않는다. setStyleSheet 는 기존 내용을 통째로
+        덮어쓰므로 크기를 여기서 지정하면 값 라벨과 크기가 어긋난다.
+        """
+        self.status_label.setText(text)
+        self.status_label.setStyleSheet(f"color:{color};")
 
     def refresh(self) -> None:
         """워크플로 목록과 ComfyUI 상태를 갱신한다."""
@@ -108,28 +227,35 @@ class ModelInfoPanel(QGroupBox):
                 )
             else:
                 self.vram_label.setText("없음")
+            # 워크플로가 특정 노드를 쓰는데 내 버전엔 그 노드가 없으면
+            # 생성이 실패한다. 버전 한 줄이 그 원인을 설명해 준다.
+            self.comfy_label.setText(info.comfyui_version or "알 수 없음")
         else:
             self.device_label.setText("-")
             self.vram_label.setText("-")
-            self.status_label.setText(f"⚠ ComfyUI 접속 실패 — {info.error or ''}")
-            self.status_label.setStyleSheet("color:#ffd93d;")
+            self.comfy_label.setText("-")
+            self._set_status(f"⚠ ComfyUI 접속 실패 — {info.error or ''}", "#ffd93d")
+        # RAM 은 실시간 값이므로 별도 메서드가 맡는다 (3초 주기).
 
         wf = self.engine.active_workflow
         if wf is None:
             self.workflow_label.setText("-")
+            self.description_label.setText("-")
             self.nodes_label.setText("-")
             self.params_label.setText("-")
             if info.online:
-                self.status_label.setText("⚠ workflows/ 폴더에 워크플로가 없습니다")
-                self.status_label.setStyleSheet("color:#ffd93d;")
+                self._set_status("⚠ workflows/ 폴더에 워크플로가 없습니다", "#ffd93d")
             return
 
         self.workflow_label.setText(wf.name)
+        # 설명은 워크플로 파일에 이미 적혀 있다. 안 쓰고 있었다.
+        self.description_label.setText(wf.description or "-")
         self.nodes_label.setText(f"{len(wf.prompt)}개")
-        self.params_label.setText(f"{len(wf.parameters)}개")
+        # "7개" 는 아무것도 알려주지 않는다. 이름이 있어야
+        # "이 워크플로로 무엇을 조절할 수 있지?" 에 답이 된다.
+        self.params_label.setText(_describe_parameters(wf.parameters))
         if info.online:
-            self.status_label.setText("✅ 준비 완료")
-            self.status_label.setStyleSheet("color:#6bcf7f;")
+            self._set_status("✅ 준비 완료", "#6bcf7f")
 
 
 class MainWindow(QWidget):
@@ -204,28 +330,39 @@ class MainWindow(QWidget):
         tabs.addTab(history_tab, "History")
 
         # 지금 무엇으로 그릴지 정하는 값이라 탭 어느 쪽에 있어도 보여야 한다.
-        # 타이틀바는 이미빽빽하므로 탭 줄 오른쪽 빈자리를 쓴다
-        # (세로 공간을 새로 먹지 않는다)
+        # 타이틀바는 이미 빽빽하므로 탭 줄 오른쪽 빈자리를 쓴다.
         #
-        # Qt.AlignTop 이 있어야 한다. QTabWidget 의 최소 높이가 매우 크기
-        # (콘텐츠를 담아야 하므로) 같은 행의 형제까지 그 높이를 따라 늘어나,
-        # combo 가 탭 줄이 아니라 화면 한가운데로 밀려 내려간다.
-        tab_row=QHBoxLayout(); tab_row.setSpacing(6)
-        tab_row.addWidget(tabs, 1)
-        tab_row.addWidget(workflow_strip, 0, Qt.AlignTop)
-        root.addLayout(tab_row, 1)
+        # 탭과 나란히 별도 레이아웃 줄을 두지 않고 탭 바의 '코너 위젯' 을 쓴다.
+        # 그래야 탭 본체와 폭을 두고 다투지 않는다. 같은 줄 레이아웃에 두면
+        # combo(긴 워크플로 이름이라 폭이 크다) 가 탭 본체의 최소 너비를
+        # 밀어내 창 오른쪽에 빈 공간이 생긴다.
+        tabs.setCornerWidget(workflow_strip, Qt.TopRightCorner)
+        root.addWidget(tabs, 1)
 
         status_bar=QHBoxLayout()
-        self.status_ram=QLabel("RAM: -"); status_bar.addWidget(self.status_ram)
-        self.status_vram=QLabel("VRAM: -"); status_bar.addWidget(self.status_vram)
-        self.status_cpu=QLabel("CPU: -"); status_bar.addWidget(self.status_cpu)
-        self.status_gpu=QLabel("GPU: -"); status_bar.addWidget(self.status_gpu)
+        # 하단 상태바는 '지금 얼마나 하고 있는가' (사용률) 전용이다.
+        # 무엇으로 돌아가는지(GPU 이름, VRAM 용량)는 타이틀바가 맡는다.
+        # 같은 값을 두 곳에 두면 어느 쪽이 '진짜'인지 헷갈린다.
+        self.status_ram=QLabel("RAM -"); status_bar.addWidget(self.status_ram)
+        self.status_cpu=QLabel("CPU -"); status_bar.addWidget(self.status_cpu)
+        self.status_vram=QLabel("VRAM -"); status_bar.addWidget(self.status_vram)
+        self.status_gpu=QLabel("GPU -"); status_bar.addWidget(self.status_gpu)
         status_bar.addStretch()
         self.status_msg=QLabel("준비됨"); status_bar.addWidget(self.status_msg)
         root.addLayout(status_bar)
-        self._mem_timer=QTimer(); self._mem_timer.timeout.connect(self._update_status_bar); self._mem_timer.start(1000)
-        # 첫 표시를 즉시 채운다 (타이머는 1초 후부터 동작하므로)
-        self._update_status_bar()
+        # GPU 사용률과 VRAM 은 ComfyUI 가 알려주지 않으므로 nvidia-smi 로 읽는다
+        self._gpu_usage=GpuUsageReader()
+        # 마지막에 읽은 VRAM (사용 GB, 전체 GB). ModelInfo 와 값을 맞춘다.
+        self._last_vram=(None, None)
+        # 갱신 주기는 지표마다 다르다.
+        #   CPU/GPU — 연산 중 급상승이라 1초 (계기판처럼 보여야 함)
+        #   RAM/VRAM — 몇 분에 걸쳐 서서히 오르므로 3초면 충분
+        # 두 타이머로 나눈 이유는 CPU 블로킹을 3분의 1 로 줄이려는 것도 있다.
+        self._fast_timer=QTimer(); self._fast_timer.timeout.connect(self._update_status_fast); self._fast_timer.start(1000)
+        self._slow_timer=QTimer(); self._slow_timer.timeout.connect(self._update_status_slow); self._slow_timer.start(3000)
+        # 첫 표시를 즉시 채운다 (타이머는 주기 뒤부터 동작하므로)
+        self._update_status_fast()
+        self._update_status_slow()
 
     def _build_workflow_strip(self) -> QWidget:
         """탭 줄 오른쪽에 붙는 워크플로 선택기.
@@ -237,12 +374,16 @@ class MainWindow(QWidget):
         row.setContentsMargins(0,0,0,0); row.setSpacing(4)
         row.addWidget(QLabel("Workflow:"))
         self.workflow=QComboBox()
-        # 워크플로 이름이 길다 (예: 'Qwen-Image 2.1 텍스트→이미지') 이므로 최소 폭을 준다
-        self.workflow.setMinimumWidth(240)
+        # 워크플로 이름이 길다 (예: 'Qwen-Image 2.1 텍스트→이미지'). 닫힌 상태는
+        # 폭을 눌러서 탭 자리를 침범하지 않게 하고, 필요 이상이면 말줄임표로
+        # 줄인다. 펼친 목록은 아래처럼 별도로 넓혀 이름이 다 보이게 한다.
+        self.workflow.setMinimumWidth(190)
+        self.workflow.setMaximumWidth(280)
+        self.workflow.view().setMinimumWidth(360)
+        row.addWidget(self.workflow)
         # 세로로는 늘어나지 않는다. 탭 줄 옆에 붙는 한 줄짜리 컨트롤이므로
         # 조합상자처럼 QTabWidget 높이까지 늘어나면 탭 줄이 아니게 된다.
         self.workflow.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        row.addWidget(self.workflow)
         box.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         return box
 
@@ -283,6 +424,9 @@ class MainWindow(QWidget):
              ("vae", "VAE"), ("lora", "LoRA"))
         ):
             combo=QComboBox(); combo.setMinimumWidth(120)
+            # 모델이 많으면 드롭다운이 화면을 다 먹는다.
+            # 8줄까지만 보여주고 나머지는 스크롤로 넘긴다.
+            combo.setMaxVisibleItems(8)
             self.model_combos[key]=combo
             self._model_labels[key]=caption
             combo.currentIndexChanged.connect(
@@ -399,34 +543,121 @@ class MainWindow(QWidget):
         theme = self.theme_manager.toggle_theme()
         self.log.append(f"Theme switched to: {theme}")
 
-    def _update_status_bar(self) -> None:
-        """하단 상태창: RAM/CPU/VRAM 실시간 업데이트.
+    def _update_status_fast(self) -> None:
+        """1초마다 갱신 — 변화가 빠른 지표만 (CPU, GPU).
 
-        VRAM 은 네이티브가 아니라 ComfyUI 가 관리하므로, 마지막으로
-        조회한 /system_stats 값을 표시한다.
+        cpu_percent(interval=0.1) 은 이름과 달리 0.1초를 실제로 sleep 한다.
+        매초 부르면 1분에 6초를 창이 멈춰 있게 된다(실측 100.5ms/회).
+        interval=None 은 직전 호출 대비 변화율이라 0.018ms 로 끝난다.
+        (첫 호출은 0 을 주지만 차이를 알아채는 데 영향이 없다)
         """
         try:
             import psutil
-            ram = psutil.virtual_memory()
-            self.status_ram.setText(
-                f"RAM: {ram.used/1024**3:.1f}/{ram.total/1024**3:.1f}GB ({ram.percent}%)"
-            )
-            self.status_cpu.setText(f"CPU: {psutil.cpu_percent(interval=0.1):.1f}%")
-        except Exception:
-            pass
 
+            self._cpu_percent = psutil.cpu_percent(interval=None)
+        except Exception:
+            self._cpu_percent = None
+        _paint_usage(
+            self.status_cpu,
+            format_usage("CPU", self._cpu_percent),
+            cpu_level(self._cpu_percent),
+        )
+        self._update_gpu_usage()
+
+    def _update_status_slow(self) -> None:
+        """3초마다 갱신 — 변화가 느린 지표 (RAM, VRAM).
+
+        RAM 은 몇 분에 걸쳐 오르는 값이라 3초 주기로도 사람이 변화를
+        알아챌 수 있다. 대신 1초마다 재면 CPU 블로킹만 늘어난다.
+        """
+        try:
+            import psutil
+
+            vm = psutil.virtual_memory()
+            # percent 와 용량을 같은 기준(total - available)으로 맞춘다.
+            used_gb = (vm.total - vm.available) / GB
+            total_gb = vm.total / GB
+            _paint_usage(
+                self.status_ram,
+                format_usage("RAM", vm.percent, used_gb, total_gb),
+                ram_level(vm.percent),
+            )
+            self._ram_used_gb, self._ram_total_gb = used_gb, total_gb
+        except Exception:
+            _paint_usage(self.status_ram, "RAM -", UsageLevel.OK)
+            self._ram_used_gb = self._ram_total_gb = None
+
+        self._update_vram()
+        # ModelInfo 의 RAM/VRAM 칸도 같은 값을 쓴다 (출처가 달라지면
+        # 8.0GB 와 7.9GB 처럼 숫자가 어긋나 보인다)
+        self.model_info.refresh_resources(*self._last_vram)
+
+    def _update_vram(self) -> None:
+        """VRAM 을 표시하고, 읽은 (사용 GB, 전체 GB) 를 기억한다.
+
+        nvidia-smi 상주 프로세스에서 읽으면 '새로고침' 을 누르기 전까지
+        값이 멈춰 있는 문제를 피할 수 있다. nvidia-smi 가 없는 기기
+        (AMD/Intel) 는 ComfyUI 가 알려준 값으로 대신한다.
+        """
+        reader = self._gpu_usage
+        if not reader.available:
+            if not reader.started:
+                # 아직 시도 안 했거나 못 찾은 상태다. 한 번만 시도한다.
+                reader.start()
+            if not reader.available:
+                self._vram_from_comfyui()
+                return
+
+        used_gb, total_gb = reader.vram_gb()
+        percent = None
+        if used_gb is not None and total_gb:
+            percent = used_gb / total_gb * 100
+        _paint_usage(
+            self.status_vram,
+            format_usage("VRAM", percent, used_gb, total_gb),
+            vram_level(percent),
+        )
+        self._last_vram = (used_gb, total_gb)
+
+    def _vram_from_comfyui(self) -> None:
+        """nvidia-smi 가 없을 때 ComfyUI 의 마지막 조회값으로 대신한다.
+
+        이 값은 '새로고침' 을 누를 때만 갱신되므로 실시간은 아니다.
+        그래도 없는 것보다 나으므로 유지한다.
+        """
         info = self.engine.system_info
         # vram_total_gb 이 있어도 vram_used_gb 이 None 일 수 있다( free 미제공 ).
         used = info.vram_used_gb
         if info.online and info.vram_total_gb and used is not None:
-            self.status_vram.setText(
-                f"VRAM: {used:.1f}/{info.vram_total_gb:.1f}GB "
-                f"({info.vram_percent:.0f}%)"
+            percent = info.vram_percent
+            _paint_usage(
+                self.status_vram,
+                format_usage("VRAM", percent, used, info.vram_total_gb),
+                vram_level(percent),
             )
-            self.status_gpu.setText(f"GPU: {info.device_name or info.device_type}")
+            self._last_vram = (used, info.vram_total_gb)
         else:
-            self.status_vram.setText("VRAM: -")
-            self.status_gpu.setText("GPU: -")
+            _paint_usage(self.status_vram, "VRAM -", UsageLevel.OK)
+            self._last_vram = (None, None)
+
+    def _update_gpu_usage(self) -> None:
+        """GPU 사용률(%) 을 표시한다.
+
+        nvidia-smi 가 없는 기기(AMD/Intel) 는 조용히 '지원 안 함' 으로
+        둔다. 상태바 한 칸이 프로그램 전체를 막을 이유는 없다.
+        """
+        reader = self._gpu_usage
+        if not reader.available:
+            if not reader.started:
+                # 아직 시도 안 했거나 못 찾은 상태다. 한 번만 시도한다.
+                reader.start()
+            if not reader.available:
+                _paint_usage(self.status_gpu, "GPU 지원 안 함", UsageLevel.OK)
+                return
+        percent = reader.percent()
+        _paint_usage(
+            self.status_gpu, format_usage("GPU", percent), gpu_level(percent)
+        )
 
     def _apply_regenerated(self, prompt: str, params: dict) -> None:
         """저장된 파라미터를 입력칸에 되돌린다 (Output/Session 공통)."""
@@ -518,7 +749,9 @@ class MainWindow(QWidget):
         )
         self.status_refresh.setEnabled(True)
         self._update_offline_banner()
-        self._update_status_bar()
+        # 서버 조회가 끝났으니 VRAM/RAM 을 즉시 반영한다.
+        # (타이머를 기다리면 갱신 전 값이 최대 3초 더 남는다)
+        self._update_status_slow()
         # 새 목록으로 콤보를 다시 채운다 (사용자가 고른 값은 유지된다)
         if self.engine.active_workflow is not None:
             self._on_workflow_changed(preserve_selection=True)
@@ -962,7 +1195,10 @@ class MainWindow(QWidget):
         # 닫은 뒤 도착하는 워커 시그널은 무시한다.
         # (대화상자가 닫힌 창에 뜨거나, 죽은 위젯에 손대게 된다)
         self._closing = True
-        self._mem_timer.stop()
+        self._fast_timer.stop()
+        self._slow_timer.stop()
+        # nvidia-smi 를 상주시켜 두므로 창을 닫으면 반드시 정리한다
+        self._gpu_usage.stop()
         # 진행 중인 조회가 창이 닫힌 뒤 시그널이 날아와 크래시가 난다
         if self._info_worker is not None and self._info_worker.isRunning():
             self._info_worker.fetched.disconnect(self._on_info_fetched)

@@ -1,0 +1,225 @@
+﻿"""상태바 갱신 회귀 테스트.
+
+이렇게 고치는 이유
+------------------
+1. `psutil.cpu_percent(interval=0.1)` 은 이름과 달리 0.1초를 실제로
+   sleep 한다(실측 100.5ms/회). 매초 부르면 1분에 6초를 창이 멈춰 있게
+   된다. `interval=None` 은 0.018ms 로 끝난다.
+2. 지표마다 주기가 다르다. CPU/GPU 는 연산 중 급상승이라 1초,
+   RAM/VRAM 은 몇 분에 걸쳐 오르므로 3초면 충분하다.
+3. RAM/VRAM 은 상태바와 ModelInfo 가 같은 값·같은 색을 보여야 한다.
+   그래서 칠하는 함수는 _paint_usage 하나뿐이다.
+"""
+from __future__ import annotations
+
+import pytest
+
+pytest.importorskip("PySide6")
+
+from PySide6.QtWidgets import QApplication, QLabel
+
+from app.engine.health import UsageLevel
+from app.gui.main_window import _LEVEL_QSS, _paint_usage
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    return QApplication.instance() or QApplication([])
+
+
+# ---------------------------------------------------------------- 색칠
+
+def test_paint_usage_sets_text_and_color(qapp):
+    label = QLabel("x")
+    _paint_usage(label, "RAM 80%", UsageLevel.WARN)
+    assert label.text() == "RAM 80%"
+    assert "ffd93d" in label.styleSheet()
+
+
+def test_paint_usage_ok_has_no_color(qapp):
+    """정상일 때는 색을 칠하지 않는다 (창이 과장되지 않는다)."""
+    label = QLabel("x")
+    _paint_usage(label, "RAM 30%", UsageLevel.OK)
+    assert label.styleSheet() == ""
+
+
+def test_paint_usage_danger_is_red(qapp):
+    label = QLabel("x")
+    _paint_usage(label, "RAM 95%", UsageLevel.DANGER)
+    assert "ff6b6b" in label.styleSheet()
+
+
+def test_paint_usage_never_leaks_color_on_return_to_ok(qapp):
+    """회귀: 빨강이었다가 정상으로 돌아와도 색이 남으면 안 된다."""
+    label = QLabel("x")
+    _paint_usage(label, "RAM 95%", UsageLevel.DANGER)
+    _paint_usage(label, "RAM 30%", UsageLevel.OK)
+    assert label.styleSheet() == "", "정상으로 돌아왔는데 색이 남았다"
+
+
+def test_every_level_has_a_color_entry():
+    """단계가 늘어도 표를 빠뜨리지 않게 한다."""
+    for level in UsageLevel:
+        assert level in _LEVEL_QSS, f"{level} 에 색이 없다"
+
+
+def test_warn_and_danger_look_different():
+    assert _LEVEL_QSS[UsageLevel.WARN] != _LEVEL_QSS[UsageLevel.DANGER]
+
+
+# ---------------------------------------------------------------- 주기
+
+def test_timers_are_split_by_metric_speed(qapp, monkeypatch):
+    """CPU/GPU 는 1초, RAM/VRAM 은 3초. 지표마다 주기가 달라야 한다."""
+    from app.gui.main_window import MainWindow
+
+    w = MainWindow()
+    try:
+        assert w._fast_timer.interval() == 1000
+        assert w._slow_timer.interval() == 3000
+    finally:
+        w._fast_timer.stop()
+        w._slow_timer.stop()
+        w.close()
+
+
+def test_cpu_percent_does_not_block(qapp, monkeypatch):
+    """회귀: interval=0.1 로 돌아가면 매초 0.1초씩 창이 멈춘다."""
+    from app.gui import main_window as mw
+
+    calls = []
+
+    class _FakePsutil:
+        @staticmethod
+        def cpu_percent(interval=None):
+            calls.append(interval)
+            return 12.0
+
+    monkeypatch.setitem(__import__("sys").modules, "psutil", _FakePsutil)
+    w = mw.MainWindow()
+    try:
+        w._update_status_fast()
+        assert calls, "cpu_percent 가 호출되지 않았다"
+        assert all(c is None for c in calls), (
+            f"interval 을 지정했다: {calls} — 0.1초 블로킹이 돌아왔다"
+        )
+    finally:
+        w._fast_timer.stop()
+        w._slow_timer.stop()
+        w.close()
+
+
+def test_status_bar_labels_show_values(qapp, monkeypatch):
+    """상태바 네 칸이 모두 채워진다."""
+    from app.gui.main_window import MainWindow
+
+    w = MainWindow()
+    try:
+        w._update_status_fast()
+        w._update_status_slow()
+        for name in ("status_ram", "status_cpu", "status_vram", "status_gpu"):
+            label = getattr(w, name)
+            assert label.text(), f"{name} 이 비어 있다"
+    finally:
+        w._fast_timer.stop()
+        w._slow_timer.stop()
+        w.close()
+
+
+# ---------------------------------------------------------------- ModelInfo
+
+def test_model_info_shows_ram(qapp):
+    """ModelInfo 에 RAM 칸이 있다. 서버가 죽는 진짜 신호이기 때문이다."""
+    from app.gui.main_window import MainWindow
+
+    w = MainWindow()
+    try:
+        w.model_info.refresh_resources()
+        assert w.model_info.ram_label.text(), "RAM 칸이 비어 있다"
+    finally:
+        w._fast_timer.stop()
+        w._slow_timer.stop()
+        w.close()
+
+
+def test_model_info_ram_and_status_bar_agree(qapp):
+    """회귀: 두 곳에 같은 판단이 보여야 한다 (색이 어긋나면 안 된다)."""
+    from app.gui.main_window import MainWindow
+
+    w = MainWindow()
+    try:
+        w._update_status_slow()
+        bar = w.status_ram.text().replace("RAM ", "")
+        info = w.model_info.ram_label.text()
+        assert bar == info, f"상태바 '{bar}' 와 ModelInfo '{info}' 가 다르다"
+        assert w.status_ram.styleSheet() == w.model_info.ram_label.styleSheet()
+    finally:
+        w._fast_timer.stop()
+        w._slow_timer.stop()
+        w.close()
+
+
+def test_model_info_shows_parameter_names_not_just_count(qapp):
+    """회귀: '7개' 는 정보가 아니다. 이름이 보여야 한다."""
+    from app.gui.main_window import MainWindow
+
+    w = MainWindow()
+    try:
+        w.model_info.refresh()
+        text = w.model_info.params_label.text()
+        assert "개" not in text, f"여전히 개수만 보여준다: {text}"
+        assert "·" in text, f"이름 목록이 아니다: {text}"
+    finally:
+        w._fast_timer.stop()
+        w._slow_timer.stop()
+        w.close()
+
+
+def test_model_info_shows_description(qapp):
+    """워크플로 설명은 파일에 이미 있는데 화면에 안 나왔었다."""
+    from app.gui.main_window import MainWindow
+
+    w = MainWindow()
+    try:
+        w.model_info.refresh()
+        assert w.model_info.description_label.text() != ""
+    finally:
+        w._fast_timer.stop()
+        w._slow_timer.stop()
+        w.close()
+
+
+def test_model_info_shows_comfyui_version(qapp):
+    """버전 한 줄이 '이 노드가 없는 버전' 같은 실패 원인을 설명해 준다."""
+    from app.gui.main_window import MainWindow
+
+    w = MainWindow()
+    try:
+        w.model_info.refresh()
+        assert w.model_info.comfy_label.text() != ""
+    finally:
+        w._fast_timer.stop()
+        w._slow_timer.stop()
+        w.close()
+
+
+def test_model_info_vram_matches_status_bar(qapp):
+    """회귀: VRAM 이 8.0GB 와 7.9GB 처럼 어긋나면 어느 쪽이 진짜인지 모른다.
+
+    ComfyUI 값(새로고침 때 갱신)과 nvidia-smi 값(실시간)이 섞이면
+    두 화면의 숫자가 다르다. 같은 출처를 쓰도록 고정한다.
+    """
+    from app.gui.main_window import MainWindow
+
+    w = MainWindow()
+    try:
+        w._update_status_slow()
+        bar = w.status_vram.text().replace("VRAM ", "")
+        info = w.model_info.vram_label.text()
+        if bar == "VRAM -":
+            pytest.skip("VRAM 을 읽지 못하는 환경")
+        assert bar == info, f"상태바 '{bar}' 와 ModelInfo '{info}' 가 다르다"
+    finally:
+        w._fast_timer.stop()
+        w._slow_timer.stop()
+        w.close()
