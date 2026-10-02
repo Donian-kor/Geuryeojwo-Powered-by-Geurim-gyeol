@@ -2,12 +2,12 @@ from __future__ import annotations
 import sys, logging, atexit
 from pathlib import Path
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
-from PySide6.QtGui import QPixmap, QBrush, QColor
+from PySide6.QtGui import QPixmap, QBrush, QColor, QFontMetrics
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit,
     QComboBox, QSpinBox, QDoubleSpinBox, QPushButton, QProgressBar,
     QMessageBox, QGroupBox, QTabWidget, QSizePolicy, QGridLayout, QSlider, QCheckBox,
-    QListWidget,
+    QListWidget, QFrame,
 )
 from app.comfy.workflow import (
     collect_extra, installed_models, missing_models,
@@ -88,14 +88,18 @@ def _describe_parameters(parameters: dict) -> str:
     "7개" 는 사용자에게 아무 정보도 주지 않는다. 이름을 보여줘야
     "이 워크플로로 무엇을 조절할 수 있는가" 에 답할 수 있다.
 
+    개행이 아니라 ' · ' 로 이어 붙인다. 13개 항목을 개행하면 세로로
+    13줄이 되어 ModelInfo 높이 전체를 차지하고, 옆 칸이 빈 공간이 된다.
+    (이것이 403px 를 만들던 원인이었다)
+
     Returns:
-        파라미터가 없으면 "없음". 이름이 여럿이면 줄바꿈으로 나눈다.
+        파라미터가 없으면 "없음".
     """
     if not parameters:
         return "없음"
     # label 이 없으면 spec.name 이 곧 파라미터 키다. 빈칸으로 두면 의미가 없다.
-    return "\n".join(
-        f"· {spec.label or spec.name}" for spec in parameters.values()
+    return " · ".join(
+        spec.label or spec.name for spec in parameters.values()
     )
 
 
@@ -112,7 +116,24 @@ class ModelInfoPanel(QGroupBox):
         self.refresh()
 
     def _build_ui(self) -> None:
-        layout = QGridLayout(self); layout.setHorizontalSpacing(10); layout.setVerticalSpacing(1)
+        """워크플로 / 서버 두 구역으로 나눠 세로로 쌓는다.
+
+        예전 2열 격자는 파라미터 목록(13~14줄) 하나가 행 높이를 통째로
+        잡아서, 반대편 칸에 10줄 넘게 빈 공간이 생겼다. 403px 가 239px 로
+        줄었다.
+
+        구역을 나눈 이유는 값의 성격이 다르기 때문이다. RAM 이 빨개지는
+        것은 워크플로 문제가 아니라 서버 문제인데, 같은 평면에 두면
+        어느 쪽 때문인지 알 수 없다.
+
+        배치:
+            워크플로 — 이름 / 설명 / 노드 (3열) + 조절 가능 (전체 폭)
+            ─────────
+            서버     — ComfyUI / GPU / VRAM / RAM (4열) + 상태
+        """
+        outer = QVBoxLayout(self)
+        outer.setSpacing(3)
+
         self.workflow_label = QLabel("-")
         self.description_label = QLabel("-")
         self.nodes_label = QLabel("-")
@@ -122,33 +143,76 @@ class ModelInfoPanel(QGroupBox):
         self.ram_label = QLabel("-")
         self.comfy_label = QLabel("-")
         self.status_label = QLabel("-")
-        # 상태 줄은 _cell 을 거치지 않으므로 색만 지정한다.
-        # 글자 크기는 앱 기본 폰트를 상속받는다.
-        self.status_label.setStyleSheet("")
         self.status_label.setWordWrap(True)
 
-        def _cell(caption: str, label: QLabel, row: int, col: int) -> None:
-            cap = QLabel(caption)
-            # font-size 를 지정하지 않는다.
-            # Models 탭의 라벨처럼 앱 기본 폰트를 그대로 상속받아야
-            # 크기가 언제나 맞는다. 픽셀로 박아두면 다른 곳만 따로 커진다.
-            cap.setStyleSheet("color:#a0a0a0;")
-            # 값 라벨은 색도 지정하지 않는다 (기본 검정 유지).
-            label.setStyleSheet("")
-            # 긴 값(워크플로 파일명 등)이 잘려 옆 칸과 겹치지 않게 한다.
-            label.setWordWrap(True)
-            layout.addWidget(cap, row * 2, col)
-            layout.addWidget(label, row * 2 + 1, col)
+        def _fit(label: QLabel) -> QLabel:
+            """라벨이 세로로 꾹 눌려 글자가 겹치지 않게 최소 높이를 준다.
 
-        _cell("Workflow", self.workflow_label, 0, 0)
-        _cell("설명", self.description_label, 0, 1)
-        _cell("조절 가능", self.params_label, 1, 0)
-        _cell("노드", self.nodes_label, 1, 1)
-        _cell("GPU", self.device_label, 2, 0)
-        _cell("VRAM", self.vram_label, 2, 1)
-        _cell("RAM", self.ram_label, 3, 0)
-        _cell("ComfyUI", self.comfy_label, 3, 1)
-        layout.addWidget(self.status_label, 8, 0, 1, 2)
+            회귀: wordWrap 을 켠 QLabel 의 minimumSizeHint 높이는 거의 0 이다.
+            (아무리 좁아도 한 줄로 쪼갤 수 있다고 생각하기 때문)
+            그래서 상위 레이아웃이 높이가 모자란 만큼 행을 눌러 버리고,
+            14px 글자가 9px 칸에 들어가 항목 이름과 값이 겹쳤다.
+            """
+            label.setWordWrap(True)
+            label.setMinimumHeight(QFontMetrics(label.font()).height())
+            return label
+
+        def _caption(text: str) -> QLabel:
+            lb = QLabel(text)
+            # font-size 를 지정하지 않는다. Models 탭의 라벨처럼 앱 기본
+            # 폰트를 상속받아야 크기가 언제나 맞는다.
+            lb.setStyleSheet("color:#a0a0a0;")
+            return _fit(lb)
+
+        def _value(label: QLabel) -> QLabel:
+            # 색은 기본 검정을 유지한다.
+            # 줄바꿈과 최소 높이가 있어야 창을 줄여도 글자가
+            # 잘리지도 겹치지도 않는다.
+            return _fit(label)
+
+        def _section(text: str) -> QLabel:
+            lb = QLabel(text)
+            lb.setStyleSheet("color:#7a7a7a;")
+            return _fit(lb)
+
+        # ── 구역 1: 워크플로 ──────────────────────────────────
+        outer.addWidget(_section("워크플로"))
+        g1 = QGridLayout()
+        g1.setHorizontalSpacing(10)
+        g1.setVerticalSpacing(1)
+        for col, (caption, label) in enumerate((
+            ("Workflow", self.workflow_label),
+            ("설명", self.description_label),
+            ("노드", self.nodes_label),
+        )):
+            g1.addWidget(_caption(caption), 0, col)
+            g1.addWidget(_value(label), 1, col)
+        # 조절 가능은 13개 이름이 들어가므로 전체 폭을 한 줄로 쓴다
+        g1.addWidget(_caption("조절 가능"), 2, 0)
+        g1.addWidget(_value(self.params_label), 3, 0, 1, 3)
+        outer.addLayout(g1)
+
+        # ── 구역 경계 ────────────────────────────────────────
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setStyleSheet("color:#c8c8c8;")
+        outer.addWidget(line)
+
+        # ── 구역 2: 서버 ──────────────────────────────────────
+        outer.addWidget(_section("서버"))
+        g2 = QGridLayout()
+        g2.setHorizontalSpacing(10)
+        g2.setVerticalSpacing(1)
+        for col, (caption, label) in enumerate((
+            ("ComfyUI", self.comfy_label),
+            ("GPU", self.device_label),
+            ("VRAM", self.vram_label),
+            ("RAM", self.ram_label),
+        )):
+            g2.addWidget(_caption(caption), 0, col)
+            g2.addWidget(_value(label), 1, col)
+        g2.addWidget(self.status_label, 2, 0, 1, 4)
+        outer.addLayout(g2)
 
     def refresh_resources(
         self,

@@ -223,3 +223,118 @@ def test_model_info_vram_matches_status_bar(qapp):
         w._fast_timer.stop()
         w._slow_timer.stop()
         w.close()
+
+
+# -------------------------------------------------- 섹션 배치 (B10)
+
+def _show_model_tab(w):
+    """Model 탭을 화면에 내준다.
+
+    QStackedWidget 은 안 보이는 페이지를 레이아웃하지 않는다.
+    숨겨진 채 측정하면 행이 꾹 눌려 겹쳐 보이고, 겹침 없는 척하는
+    거짓말을 하게 된다. (첫 실측이 그랬다)
+    """
+    from PySide6.QtWidgets import QTabWidget
+
+    tabs = w.findChild(QTabWidget)
+    if tabs is None:
+        return
+    for i in range(tabs.count()):
+        if "Model" in tabs.tabText(i):
+            tabs.setCurrentIndex(i)
+            return
+    pytest.skip("Model 탭을 찾지 못했다")
+
+
+def _label_geometry(panel):
+    """(top, height, text) 목록을 위에서 아래 순으로."""
+    out = []
+    for lab in panel.findChildren(QLabel):
+        text = lab.text().strip()
+        if not text:
+            continue
+        g = lab.geometry()
+        out.append((g.top(), g.height(), text))
+    return sorted(out)
+
+
+def test_model_info_has_two_sections(qapp):
+    """워크플로 / 서버 로 나눴다.
+
+    RAM 이 빨개지는 건 서버 문제인데 워크플로 정보와 같은 평면에 두면
+    어느 쪽 때문인지 알 수 없다.
+    """
+    from app.gui.main_window import MainWindow
+
+    w = MainWindow()
+    try:
+        _show_model_tab(w)
+        app.processEvents()
+        texts = [t for _, _, t in _label_geometry(w.model_info)]
+        assert "워크플로" in texts
+        assert "서버" in texts
+    finally:
+        w._fast_timer.stop()
+        w._slow_timer.stop()
+        w.close()
+
+
+def test_model_info_labels_do_not_overlap(qapp):
+    """회귀: 라벨이 세로로 꾹 눌리면 항목 이름과 값이 겹친다.
+
+    wordWrap 을 켠 QLabel 의 minimumSizeHint 높이는 거의 0 이어서
+    레이아웃이 행을 누른다. 14px 글자가 9px 칸에 들어가 겹쳤다.
+    """
+    from app.gui.main_window import MainWindow
+
+    w = MainWindow()
+    try:
+        _show_model_tab(w)
+        for _ in range(3):
+            app.processEvents()
+        rows = _label_geometry(w.model_info)
+        for (top1, h1, t1), (top2, h2, t2) in zip(rows, rows[1:]):
+            if top1 == top2:
+                continue          # 같은 줄의 나란한 칸은 겹침이 아니다
+            assert top1 + h1 <= top2 + 1, (
+                f"겹침: '{t1}'(y={top1},h={h1}) 와 "
+                f"'{t2}'(y={top2}) 가 포개진다"
+            )
+    finally:
+        w._fast_timer.stop()
+        w._slow_timer.stop()
+        w.close()
+
+
+def test_model_info_is_much_shorter_than_before(qapp):
+    """회귀: 파라미터 13개를 개행하면 14줄이 되어 패널이 400px 넘었다."""
+    from app.gui.main_window import MainWindow
+
+    w = MainWindow()
+    try:
+        _show_model_tab(w)
+        for _ in range(3):
+            app.processEvents()
+        h = w.model_info.height()
+        assert h < 320, f"패널이 {h}px 로 다시 늘었다 (예전 403px)"
+    finally:
+        w._fast_timer.stop()
+        w._slow_timer.stop()
+        w.close()
+
+
+def test_params_are_one_wrapped_line_not_thirteen(qapp):
+    """회귀: ' · ' 로 이어 붙여야 한 줄(줄바꿈 가능)로 들어간다."""
+    from app.gui.main_window import MainWindow
+
+    w = MainWindow()
+    try:
+        _show_model_tab(w)
+        w.model_info.refresh()
+        text = w.model_info.params_label.text()
+        assert "\n" not in text, "여전히 개행으로 여러 줄을 쌓는다"
+        assert text.count("·") >= 5, f"이름이 빠졌다: {text[:60]}"
+    finally:
+        w._fast_timer.stop()
+        w._slow_timer.stop()
+        w.close()
