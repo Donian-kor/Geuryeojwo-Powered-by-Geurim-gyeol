@@ -7,23 +7,16 @@ from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit,
     QComboBox, QSpinBox, QDoubleSpinBox, QPushButton, QProgressBar,
     QMessageBox, QGroupBox, QTabWidget, QSizePolicy, QGridLayout, QSlider, QCheckBox,
+    QListWidget,
+)
+from app.comfy.workflow import (
+    collect_extra, installed_models, missing_models,
 )
 from app.engine.comfy_engine import GeurimGyeolEngine, _is_enhancer
 from app.gui.session_browser import HistoryBrowser
 from app.gui.theme.manager import ThemeManager
 
 ROOT = Path(__file__).resolve().parents[2]
-
-# 파라미터 키 -> ComfyUI 입력 이름 (모델 선택 위젯 매핑용)
-_MODEL_INPUT_BY_KEY = {
-    "unet": "unet_name", "checkpoint": "ckpt_name", "clip": "clip_name",
-    "vae": "vae_name", "lora": "lora_name",
-}
-
-
-def combo_of_input(params: dict, key: str) -> str:
-    """파라미터 키에 대응하는 ComfyUI 입력 이름을 돌려준다."""
-    return _MODEL_INPUT_BY_KEY.get(key, key)
 
 
 class Worker(QThread):
@@ -198,14 +191,29 @@ class MainWindow(QWidget):
         self.status_banner.setVisible(False)
         root.addWidget(self.status_banner)
 
-        tabs=QTabWidget(); root.addWidget(tabs, 1)
+        tabs=QTabWidget()
         # Model 탭을 먼저 만든다. _on_workflow_changed() 가 self.model_info 를
         # 참조하므로, Generate 탭의 시그널이 불리기 전에 준비되어야 한다.
+        # 워크플로 선택기는 Model 탭이 먼저 참조하므로 그보다 앞에 만든다.
+        workflow_strip=self._build_workflow_strip()
         model_tab=self._build_model_tab()
         generate_tab=self._build_generate_tab()
+        history_tab=self._build_history_tab()
         tabs.addTab(generate_tab, "Generate")
         tabs.addTab(model_tab, "Model")
-        tabs.addTab(self._build_history_tab(), "History")
+        tabs.addTab(history_tab, "History")
+
+        # 지금 무엇으로 그릴지 정하는 값이라 탭 어느 쪽에 있어도 보여야 한다.
+        # 타이틀바는 이미빽빽하므로 탭 줄 오른쪽 빈자리를 쓴다
+        # (세로 공간을 새로 먹지 않는다)
+        #
+        # Qt.AlignTop 이 있어야 한다. QTabWidget 의 최소 높이가 매우 크기
+        # (콘텐츠를 담아야 하므로) 같은 행의 형제까지 그 높이를 따라 늘어나,
+        # combo 가 탭 줄이 아니라 화면 한가운데로 밀려 내려간다.
+        tab_row=QHBoxLayout(); tab_row.setSpacing(6)
+        tab_row.addWidget(tabs, 1)
+        tab_row.addWidget(workflow_strip, 0, Qt.AlignTop)
+        root.addLayout(tab_row, 1)
 
         status_bar=QHBoxLayout()
         self.status_ram=QLabel("RAM: -"); status_bar.addWidget(self.status_ram)
@@ -219,20 +227,40 @@ class MainWindow(QWidget):
         # 첫 표시를 즉시 채운다 (타이머는 1초 후부터 동작하므로)
         self._update_status_bar()
 
-    def _build_model_tab(self) -> QWidget:
-        """Model 탭 — 워크플로 선택, 모델 파일, 워크플로 요약.
+    def _build_workflow_strip(self) -> QWidget:
+        """탭 줄 오른쪽에 붙는 워크플로 선택기.
 
-        모델 파일 목록은 선택한 워크플로에 종속되므로 워크플로 선택과
-        같은 화면에 둔다. Generate 탭의 세로 공간을 확보하는 효과도 있다.
+        지금 무엇으로 그릴지 정하는 값이라 어떤 탭에서도 보여야 한다.
+        combos/ 목록 갱신은 '상태 새로고침' 이 함께 하므로 별도 버튼이 없다.
+        """
+        box=QWidget(); row=QHBoxLayout(box)
+        row.setContentsMargins(0,0,0,0); row.setSpacing(4)
+        row.addWidget(QLabel("Workflow:"))
+        self.workflow=QComboBox()
+        # 워크플로 이름이 길다 (예: 'Qwen-Image 2.1 텍스트→이미지') 이므로 최소 폭을 준다
+        self.workflow.setMinimumWidth(240)
+        # 세로로는 늘어나지 않는다. 탭 줄 옆에 붙는 한 줄짜리 컨트롤이므로
+        # 조합상자처럼 QTabWidget 높이까지 늘어나면 탭 줄이 아니게 된다.
+        self.workflow.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        row.addWidget(self.workflow)
+        box.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        return box
+
+    def _build_model_tab(self) -> QWidget:
+        """Model 탭 — 등록된 워크플로 전체 목록, 모델 파일, 워크플로 요약.
+
+        지금 쓸 워크플로는 창 상단 드롭다운으로 고른다. 여기서는
+        workflows/ 에 등록된 전체를 한눈에 보고 목록에서 바로 고를 수 있게 한다.
+        모델 파일 목록은 선택한 워크플로에 종속되므로 같은 화면에 둔다.
         """
         tab=QWidget(); layout=QVBoxLayout(tab)
 
-        wfbox=QGroupBox("Workflow"); form=QHBoxLayout(wfbox); form.setSpacing(4)
-        self.workflow=QComboBox()
-        form.addWidget(QLabel("워크플로")); form.addWidget(self.workflow, 1)
-        self.reload_wf=QPushButton("불러오기"); self.reload_wf.clicked.connect(self._reload_workflows)
-        form.addWidget(self.reload_wf)
-        layout.addWidget(wfbox)
+        wfbox=QGroupBox("등록된 워크플로"); wf_layout=QVBoxLayout(wfbox)
+        self.workflow_list=QListWidget()
+        # 목록에서 고르면 상단 드롭다운이 따라간다
+        self.workflow_list.itemSelectionChanged.connect(self._on_workflow_list_selected)
+        wf_layout.addWidget(self.workflow_list)
+        layout.addWidget(wfbox, 1)
 
         # 모델 선택 — ComfyUI 의 폴더별 목록에서 고른다 (v0.2 §5.3)
         self.model_boxes=QGroupBox("Models"); ml=QGridLayout(self.model_boxes)
@@ -516,7 +544,10 @@ class MainWindow(QWidget):
         self.status_banner.setVisible(True)
 
     def _reload_workflows(self):
-        """workflows/ 폴더를 다시 읽어 드롭다운을 채운다."""
+        """workflows/ 폴더를 다시 읽어 드롭다운과 목록을 채운다.
+
+        '상태 새로고침' 이 이 메서드를 함께 부르므로 별도 버튼은 없다.
+        """
         self.workflow.blockSignals(True)
         self.workflow.clear()
         for wf in self.engine.refresh_workflows():
@@ -527,10 +558,37 @@ class MainWindow(QWidget):
                 if self.workflow.itemData(i) == self.engine.active_workflow.path.stem:
                     self.workflow.setCurrentIndex(i)
                     break
+        self._sync_workflow_list()
         # 워크플로를 다시 읽는 것은 목록 갱신이지 워크플로 변경이 아니므로
         # 사용자가 고른 모델/샘플러를 유지한다.
         # (백그라운드 조회가 끝난 뒤 다시 채울 때도 같은 값을 되돌려 둔다)
         self._on_workflow_changed(preserve_selection=True)
+
+    def _sync_workflow_list(self) -> None:
+        """Model 탭의 목록을 드롭다운 내용과 선택으로 맞춘다.
+
+        재생성으로 드롭다운이 바뀌는 경우에도 따라가야 하므로
+        드롭다운이 바뀔 때마다 부른다.
+        """
+        # 목록은 Model 탭을 만들면서 생긴다. 그 전에 불릴 수 있다
+        if not hasattr(self, "workflow_list"):
+            return
+        self.workflow_list.blockSignals(True)
+        self.workflow_list.clear()
+        for i in range(self.workflow.count()):
+            self.workflow_list.addItem(self.workflow.itemText(i))
+        index = self.workflow.currentIndex()
+        if index >= 0:
+            self.workflow_list.setCurrentRow(index)
+        self.workflow_list.blockSignals(False)
+
+    def _on_workflow_list_selected(self) -> None:
+        """Model 탭 목록에서 고른 워크플로를 상단 드롭다운에 반영한다."""
+        row = self.workflow_list.currentRow()
+        # 같은 항목을 고르면 드롭다운을 건드리지 않는다 (불필요한 재적용 방지)
+        if row < 0 or row == self.workflow.currentIndex():
+            return
+        self.workflow.setCurrentIndex(row)
 
     def _on_workflow_changed(self, preserve_selection: bool = False):
         """워크플로 선택을 엔진에 반영하고 입력 가능 여부를 갱신한다.
@@ -541,6 +599,8 @@ class MainWindow(QWidget):
         name = self.workflow.currentData()
         if name is not None:
             self.engine.select_workflow(name)
+        # 재생성 등으로 드롭다운이 바뀌면 목록 강조도 따라간다
+        self._sync_workflow_list()
         wf = self.engine.active_workflow
         self.model_info.refresh()
         if wf is None:
@@ -645,14 +705,22 @@ class MainWindow(QWidget):
             combo.blockSignals(False)
         self._paint_missing_models()
 
+    def _active_params(self) -> dict:
+        """활성 워크플로의 parameters 맵."""
+        return (self.engine.active_workflow.parameters
+                if self.engine.active_workflow else {})
+
+    def _model_selections(self) -> dict[str, str]:
+        """활성화된 모델 콤보의 현재 값만 모은다."""
+        return {
+            key: combo.currentText()
+            for key, combo in self.model_combos.items()
+            if combo.isEnabled()
+        }
+
     def _installed_models(self, key: str) -> list[str]:
         """이 모델 키가 쓰는 ComfyUI 폴더의 설치된 파일 목록."""
-        params = (self.engine.active_workflow.parameters
-                  if self.engine.active_workflow else {})
-        spec = params.get(key)
-        if spec is None or ":" not in spec.kind:
-            return []
-        return list(self._model_options.get(spec.kind.split(":", 1)[1]) or [])
+        return installed_models(self._model_options, self._active_params(), key)
 
     def _paint_missing_models(self) -> None:
         """설치되지 않은 모델 항목을 빨간색과 툴팁으로 표시한다."""
@@ -682,17 +750,9 @@ class MainWindow(QWidget):
         Returns:
             [(콤보 키, 모델 파일명), ...]
         """
-        missing: list[tuple[str, str]] = []
-        for key, combo in self.model_combos.items():
-            if not combo.isEnabled():
-                continue
-            text = combo.currentText()
-            if not text or text.startswith("("):
-                continue
-            installed = self._installed_models(key)
-            if installed and text not in installed:
-                missing.append((key, text))
-        return missing
+        return missing_models(
+            self._model_options, self._active_params(), self._model_selections()
+        )
 
     def _update_model_warning(self, _key=None) -> None:
         """모델 탭의 경고 라벨을 갱신한다.
@@ -845,36 +905,22 @@ class MainWindow(QWidget):
     def _collect_extra(self) -> dict:
         """워크플로에 선택적 파라미터 값을 모아서 반환한다.
 
-        키는 워크플로의 parameters 맵에 있는 이름이어야 한다
-        (워크플로마다 "sampler" 또는 "sampler_name" 처럼 다를 수 있다).
+        키 이름은 워크플로마다 다르므로("sampler" 또는 "sampler_name"),
+        매핑과 값 조립은 workflow.collect_extra 가 맡는다.
         비활성화된 항목은 보내지 않는다 — 그래야 워크플로 기본값이 유지된다.
         """
-        params = (self.engine.active_workflow.parameters
-                  if self.engine.active_workflow else {})
-        # ComfyUI 입력 이름 -> 파라미터 키
-        by_input = {spec.input: key for key, spec in params.items()}
-
-        extra: dict = {}
+        selections = self._model_selections()
         if self.sampler.isEnabled():
-            key = by_input.get("sampler_name")
-            if key and self.sampler.currentText():
-                extra[key] = self.sampler.currentText()
+            selections["sampler"] = self.sampler.currentText()
         if self.scheduler.isEnabled():
-            key = by_input.get("scheduler")
-            if key and self.scheduler.currentText():
-                extra[key] = self.scheduler.currentText()
-        # 모델 선택 (확산 모델/텍스트 인코더/VAE/LoRA)
-        for model_key, combo in self.model_combos.items():
-            if not combo.isEnabled():
-                continue
-            key = by_input.get(combo_of_input(params, model_key))
-            if key and combo.currentText():
-                extra[key] = combo.currentText()
-        # LoRA 강도
-        key = getattr(self, "_lora_strength_key", None)
-        if key:
-            extra[key] = round(self.lora_strength.value() / 100, 2)
-        return extra
+            selections["scheduler"] = self.scheduler.currentText()
+
+        lora_key = getattr(self, "_lora_strength_key", None)
+        lora_strength = (self.lora_strength.value() / 100) if lora_key else None
+        return collect_extra(
+            self._active_params(), selections,
+            lora_key=lora_key, lora_strength=lora_strength,
+        )
 
     def _on_progress(self, percent, message):
         """진행률 콜백 (Worker 스레드에서 호출)."""

@@ -89,6 +89,101 @@ class Workflow:
         return f"{self.name} — {self.description}" if self.description else self.name
 
 
+# GUI 위젯 키 -> ComfyUI 입력 이름
+WIDGET_KEY_TO_INPUT = {
+    "unet": "unet_name", "checkpoint": "ckpt_name", "clip": "clip_name",
+    "vae": "vae_name", "lora": "lora_name",
+    "sampler": "sampler_name", "scheduler": "scheduler",
+}
+
+
+def input_of(widget_key: str) -> str:
+    """GUI 위젯 키에 대응하는 ComfyUI 입력 이름을 돌려준다."""
+    return WIDGET_KEY_TO_INPUT.get(widget_key, widget_key)
+
+
+def model_folder(params: dict, key: str) -> str:
+    """이 모델 키가 쓰는 ComfyUI 폴더 이름. 모르면 빈 문자열."""
+    spec = params.get(key)
+    if spec is None or ":" not in spec.kind:
+        return ""
+    return spec.kind.split(":", 1)[1]
+
+
+def installed_models(options: dict, params: dict, key: str) -> list[str]:
+    """ComfyUI 가 보고한 폴더별 목록에서 이 키의 설치된 파일만 꺼낸다.
+
+    options: {"diffusion_models": [...], "loras": [...], ...}
+             (None 이면 목록을 못 받은 상태로 본다)
+    """
+    folder = model_folder(params, key)
+    if not folder:
+        return []
+    return list((options or {}).get(folder) or [])
+
+
+def missing_models(
+    options: dict,
+    params: dict,
+    selections: dict[str, str],
+) -> list[tuple[str, str]]:
+    """선택된 값 중 ComfyUI 에 설치되지 않은 모델을 찾는다.
+
+    대체해 버리면 사용자는 자신이 무엇을 생성했는지 알 수 없게 된다.
+    그래서 여기서는 판정만 하고 GUI 가 표시와 차단 을 맡는다.
+
+    Args:
+        selections: {위젯 키: 선택된 텍스트}
+            빈 값과 "(사용 안 함)" 같은 표시용 값은 무시한다.
+
+    Returns:
+        [(위젯 키, 파일명), ...]
+    """
+    found: list[tuple[str, str]] = []
+    for key, text in (selections or {}).items():
+        if not text or text.startswith("("):
+            continue
+        installed = installed_models(options, params, key)
+        # 목록을 못 받은 상태면 판정할 수 없다 (때로 없다고 보지 않는다)
+        if installed and text not in installed:
+            found.append((key, text))
+    return found
+
+
+def collect_extra(
+    params: dict,
+    selections: dict[str, str],
+    lora_key: str | None = None,
+    lora_strength: float | None = None,
+) -> dict[str, Any]:
+    """위젯에서 고른 값을 워크플로 파라미터 키로 바꿔 만든다.
+
+    키 이름은 워크플로마다 다르다 ("sampler" 또는 "sampler_name").
+    그래서 ComfyUI 입력 이름을 거쳐 spec.input 로 조회한다.
+    비활성 항목은 보내지 않는다 — 그래야 워크플로 기본값이 유지된다.
+
+    Args:
+        params: 워크플로의 parameters 맵
+        selections: {위젯 키: 선택된 텍스트}
+        lora_key: LoRA 강도를 넣을 파라미터 키
+        lora_strength: LoRA 강도 (0.00~1.50)
+
+    Returns:
+        {파라미터 키: 값}
+    """
+    by_input = {spec.input: key for key, spec in params.items()}
+    extra: dict[str, Any] = {}
+    for widget_key, text in (selections or {}).items():
+        if not text or text.startswith("("):
+            continue
+        key = by_input.get(input_of(widget_key))
+        if key:
+            extra[key] = text
+    if lora_key and lora_strength is not None:
+        extra[lora_key] = round(lora_strength, 2)
+    return extra
+
+
 def _parse_parameters(raw: dict) -> dict[str, ParameterSpec]:
     """parameters 맵을 ParameterSpec 로 변환."""
     specs: dict[str, ParameterSpec] = {}
