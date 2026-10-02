@@ -7,10 +7,12 @@ from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit,
     QComboBox, QSpinBox, QDoubleSpinBox, QPushButton, QProgressBar,
     QMessageBox, QGroupBox, QTabWidget, QSizePolicy, QGridLayout, QSlider, QCheckBox,
-    QListWidget, QFrame,
+    QListWidget, QFrame, QDialog,
 )
+from app.comfy.check import prompt_of
+from app.comfy.config import guess_models_dir
 from app.comfy.workflow import (
-    collect_extra, installed_models, missing_models,
+    collect_extra, installed_models, missing_models, save_profile,
 )
 from app.engine.comfy_engine import (
     GeurimGyeolEngine, _find_enhancer_node, injection_block_reason,
@@ -19,6 +21,7 @@ from app.engine.health import (
     UsageLevel, cpu_level, format_usage, gpu_level, ram_level, vram_level,
 )
 from app.gui.gpu_usage import GpuUsageReader
+from app.gui.import_dialog import ImportWorkflowDialog
 from app.gui.session_browser import HistoryBrowser
 from app.gui.theme.manager import ThemeManager
 
@@ -471,6 +474,14 @@ class MainWindow(QWidget):
         # 목록에서 고르면 상단 드롭다운이 따라간다
         self.workflow_list.itemSelectionChanged.connect(self._on_workflow_list_selected)
         wf_layout.addWidget(self.workflow_list)
+        # ComfyUI 에서 워크플로를 가져와 새로 등록한다
+        self.import_btn=QPushButton("+ 가져오기")
+        self.import_btn.setToolTip(
+            "ComfyUI 에서 File → Export Workflow (API) 로 내보낸 워크플로를\n"
+            "가져와 등록합니다."
+        )
+        self.import_btn.clicked.connect(self._on_import_workflow)
+        wf_layout.addWidget(self.import_btn)
         layout.addWidget(wfbox, 1)
 
         # 모델 선택 — ComfyUI 의 폴더별 목록에서 고른다 (v0.2 §5.3)
@@ -490,7 +501,10 @@ class MainWindow(QWidget):
         self._model_warning.setStyleSheet("color:#ff6b6b; font-size:12px;")
         self._model_warning.setVisible(False)
         for row, (key, caption) in enumerate(
-            (("unet", "확산 모델"), ("clip", "텍스트 인코더"),
+            # 체크포인트(SD 계열) 와 확산 모델(Qwen 계열) 은 서로 다른 폴더다.
+            # 한 워크플로는 둘 중 하나만 쓰므로 쓰지 않는 쪽은 비활성화된다.
+            (("checkpoint", "체크포인트"),
+             ("unet", "확산 모델"), ("clip", "텍스트 인코더"),
              ("vae", "VAE"), ("lora", "LoRA"))
         ):
             combo=QComboBox(); combo.setMinimumWidth(120)
@@ -511,6 +525,62 @@ class MainWindow(QWidget):
         layout.addStretch()
         self.workflow.currentIndexChanged.connect(lambda _: self._on_workflow_changed())
         return tab
+
+    # --- 워크플로 가져오기 ------------------------------------------------
+
+    def _models_dir(self) -> str:
+        """ComfyUI models 폴더.
+
+        설정에 없다면 흔한 설치 위치에서 찾아본다. 못 찾으면 빈 문자열을
+        돌려주고, 그때는 화면에 '어디에 넣어야 하는지'를 안내하지 않는다.
+        """
+        cfg = self.engine.config
+        if not cfg.models_dir:
+            cfg.models_dir = guess_models_dir(cfg.model_folders)
+        return cfg.models_dir
+
+    def _on_import_workflow(self) -> None:
+        """가져오기 창을 열고, 확인되면 등록한다."""
+        dlg = ImportWorkflowDialog(
+            engine=self.engine,
+            installed_models=self._comfy_models,
+            models_dir=self._models_dir(),
+            parent=self,
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return
+        self._register_imported(dlg)
+
+    def _register_imported(self, dlg) -> None:
+        """가져온 워크플로를 저장하고 목록에 올린다.
+
+        저장한 뒤 엔진에 다시 읽히게 하고 방금 것을 선택한다.
+        그러면 Models 콤보와 Generate 값이 자동으로 따라온다.
+        """
+        name = dlg.workflow_name().strip()
+        if not name:
+            self.status.setText("이름을 입력해야 등록할 수 있습니다.")
+            return
+        prompt = prompt_of(dlg.document() or {}) or {}
+        if not prompt:
+            self.status.setText("등록할 워크플로 노드를 찾지 못했습니다.")
+            return
+        target = save_profile(
+            self.engine.workflow_dir, name,
+            dlg.workflow_description(), prompt, dlg.chosen_output(),
+        )
+        saved = next(
+            (wf for wf in self.engine.refresh_workflows() if wf.path == target),
+            None,
+        )
+        if saved is None:
+            self.status.setText(
+                f"저장했지만 목록에서 찾지 못했습니다: {target.name}"
+            )
+            return
+        self.engine.active_workflow = saved
+        self._reload_workflows()
+        self.status.setText(f"'{name}' 등록했습니다.")
 
     def _build_generate_tab(self) -> QWidget:
         """Generate 탭 (v0.2).

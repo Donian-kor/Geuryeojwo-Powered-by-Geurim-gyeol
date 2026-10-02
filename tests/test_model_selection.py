@@ -232,4 +232,125 @@ def test_installed_model_generation_is_not_blocked(make_window, monkeypatch):
         if w.worker is not None:
             w.worker.wait(5000)
         w.close()
+# --- 체크포인트(SD 계열) ------------------------------------------------
+
+# 회귀 근거:
+# Model 탭의 모델 콤보는 4개(unet/clip/vae/lora) 로 고정돼 있었다.
+# 그 결과 CheckpointLoaderSimple 을 쓰는 워크플로를 등록하면
+# 'checkpoint' 파라미터가 생겨도 고를 칸이 없어서
+# 설치돼 있는 체크포인트를 하나도 고를 수 없었다.
+
+SD_OPTIONS = {
+    "checkpoints": ["sdA.safetensors", "sdB.safetensors"],
+    "diffusion_models": [],
+    "text_encoders": [],
+    "vae": [],
+    "loras": [],
+}
+
+
+@pytest.fixture
+def make_sd_window(qapp, tmp_path, monkeypatch, project_root):
+    """체크포인트를 쓰는(SD 계열) 워크플로로 MainWindow 를 만들어 준다."""
+
+    def _build(checkpoint: str):
+        import app.gui.main_window as mw
+
+        prompt = {
+            "1": {"class_type": "CheckpointLoaderSimple",
+                  "inputs": {"ckpt_name": checkpoint}},
+            "2": {"class_type": "CLIPTextEncode",
+                  "inputs": {"text": "고양이", "clip": ["1", 1]}},
+            "3": {"class_type": "EmptyLatentImage",
+                  "inputs": {"width": 512, "height": 512, "batch_size": 1}},
+            "4": {"class_type": "KSampler",
+                  "inputs": {"seed": 1, "steps": 20, "cfg": 7.0,
+                             "sampler_name": "euler", "scheduler": "normal",
+                             "denoise": 1, "model": ["1", 0],
+                             "positive": ["2", 0], "negative": ["2", 0],
+                             "latent_image": ["3", 0]}},
+            "5": {"class_type": "VAEDecode",
+                  "inputs": {"samples": ["4", 0], "vae": ["1", 2]}},
+            "6": {"class_type": "SaveImage", "inputs": {"images": ["5", 0]}},
+        }
+        root = tmp_path / "sdroot"
+        for name in ("config", "workflows", "outputs", "sessions"):
+            (root / name).mkdir(parents=True, exist_ok=True)
+        shutil.copy(project_root / "config" / "comfyui.json",
+                    root / "config" / "comfyui.json")
+        (root / "workflows" / "S.json").write_text(
+            json.dumps({"name": "SD", "prompt": prompt}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        async def _fake_system_info(self):
+            return SystemInfo(
+                online=True, comfyui_version="0.0.0-test",
+                device_name="TEST GPU", vram_total_gb=8.0, vram_free_gb=4.0,
+            )
+
+        monkeypatch.setattr(ComfyClient, "get_system_info", _fake_system_info)
+        monkeypatch.setattr(
+            GeurimGyeolEngine, "model_options", lambda self: dict(SD_OPTIONS)
+        )
+        monkeypatch.setattr(
+            GeurimGyeolEngine, "sampler_options",
+            lambda self: {"sampler": ["euler"], "scheduler": ["normal"]},
+        )
+        monkeypatch.setattr(
+            GeurimGyeolEngine, "online", property(lambda self: True)
+        )
+        monkeypatch.setattr(mw, "ROOT", root)
+
+        window = mw.MainWindow()
+        qapp.processEvents()
+        if window._info_worker is not None:
+            window._info_worker.wait(5000)
+        for _ in range(5):
+            qapp.processEvents()
+        return window
+
+    return _build
+
+
+def test_checkpoint_combo_exists(make_sd_window):
+    w = make_sd_window(SD_OPTIONS["checkpoints"][0])
+    try:
+        assert "checkpoint" in w.model_combos
+    finally:
+        w.close()
+
+
+def test_checkpoint_combo_lists_installed_models(make_sd_window):
+    w = make_sd_window("sdA.safetensors")
+    try:
+        combo = w.model_combos["checkpoint"]
+        assert combo.isEnabled(), "체크포인트 고르는 칸이 비활성이다"
+        items = [combo.itemText(i) for i in range(combo.count())]
+        assert "sdA.safetensors" in items and "sdB.safetensors" in items
+        assert combo.currentText() == "sdA.safetensors"
+    finally:
+        w.close()
+
+
+def test_unet_combo_disabled_for_sd_workflow(make_sd_window):
+    """SD 워크플로는 확산 모델 폴더를 보지 않는다."""
+    w = make_sd_window("sdA.safetensors")
+    try:
+        combo = w.model_combos["unet"]
+        assert combo.isEnabled() is False
+        assert combo.itemText(0) == "(사용 안 함)"
+    finally:
+        w.close()
+
+
+def test_checkpoint_combo_disabled_for_qwen_workflow(make_window):
+    """회귀: Qwen 워크플로에서는 체크포인트 칸이 꺼져 있어야 한다."""
+    w = make_window("installedA.safetensors")
+    try:
+        combo = w.model_combos["checkpoint"]
+        assert combo.isEnabled() is False
+        assert combo.itemText(0) == "(사용 안 함)"
+    finally:
+        w.close()
 
