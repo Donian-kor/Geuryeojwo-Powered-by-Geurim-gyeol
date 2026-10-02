@@ -201,6 +201,7 @@ _FOLDER_LABEL = {
     "upscale_models": "업스케일 모델",
     "configs": "설정 파일",
     "sam": "SAM 모델",
+    "LLM": "인핸서 GGUF",
 }
 
 

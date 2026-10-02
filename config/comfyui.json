@@ -12,6 +12,7 @@
     "diffusion_models",
     "vae",
     "loras",
-    "text_encoders"
+    "text_encoders",
+    "LLM"
   ]
 }

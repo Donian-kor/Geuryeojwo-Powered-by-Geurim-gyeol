@@ -27,6 +27,9 @@ DEFAULT_CONFIG = {
         "vae",
         "loras",
         "text_encoders",
+        # 프롬프트 인핸서(T8 팩)가 쓰는 로컬 LLM(GGUF) 폴더.
+        # Diffusion 모델과 종류가 달라 따로 읽어와야 한다.
+        "LLM",
     ],
     # ComfyUI 의 models 폴더. 모델이 없으면 '어디에 넣어야 하는지'
     # 알려줄 수 없으므로 등록 화면의 안내에 쓰인다.

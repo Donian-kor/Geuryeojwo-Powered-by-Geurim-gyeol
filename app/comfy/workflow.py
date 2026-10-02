@@ -345,12 +345,21 @@ _MODEL_FOLDERS_BY_NODE = {
     "UpscaleModelLoader": ("model_name", "upscale_models"),
     "SAMLoader": ("model_name", "sam"),
     "SAMLoaderCombined": ("model_name", "sam"),
+    # 프롬프트 인핸서(T8 팩) — Diffusion 모델이 아니라 로컬 LLM(GGUF) 다.
+    # 노드가 설치된 목록을 직접 주므로 폴더 경로를 우리가 따로 알 필요는 없다.
+    # (노드 코드의 MODEL_SUBDIRECTORY = "LLM")
+    "QwenImage21PromptEnhancerT8": ("local_model", "LLM"),
+    "MiniMaxH3PromptEnhancerT8": ("local_model", "LLM"),
+    "Seedance20PromptEnhancerT8": ("local_model", "LLM"),
 }
 # 노드 종류 -> (파라미터 키, 화면 라벨)
 _NODE_LABELS = {
     "UpscaleModelLoader": ("upscale_model", "업스케일 모델"),
     "SAMLoader": ("sam_model", "SAM 모델"),
     "SAMLoaderCombined": ("sam_model", "SAM 모델"),
+    "QwenImage21PromptEnhancerT8": ("local_model", "인핸서 모델 (로컬 GGUF)"),
+    "MiniMaxH3PromptEnhancerT8": ("local_model", "인핸서 모델 (로컬 GGUF)"),
+    "Seedance20PromptEnhancerT8": ("local_model", "인핸서 모델 (로컬 GGUF)"),
 }
 # 파라미터 키 -> (키, 화면 라벨)
 _MODEL_LABELS = {

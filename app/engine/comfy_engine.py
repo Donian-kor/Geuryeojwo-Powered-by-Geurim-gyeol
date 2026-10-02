@@ -54,6 +54,10 @@ _PROMPT_TEXT_INPUTS = ("text", "prompt", "positive", "user_prompt")
 # 노드를 방금 설치했을 수 있으니 너무 길지 않게 둔다.
 # 한 번에 여러 파일을 확인하는 동안에는 재사용된다.
 _LIST_CACHE_TTL = 300.0
+# 설정에 model_folders 가 없을 때 쓸 기본 목록.
+_DEFAULT_MODEL_FOLDERS = (
+    "checkpoints", "diffusion_models", "vae", "loras", "text_encoders", "LLM",
+)
 
 
 def _is_enhancer(class_type: str) -> bool:
@@ -185,6 +189,10 @@ class GenerationRequest:
     extra: dict[str, Any] = field(default_factory=dict)
     # False 면 워크플로의 프롬프트 인핸서 노드를 건너뛴다
     enhance_prompt: bool = True
+    # 인핸서가 쓰는 로컬 GGUF 파일명.
+    # 워크플로에 인핸서 노드가 없을 때 생성 시점에 자동으로 끼워 넣으므로
+    # 노드 ID 가 없다. 그래 값을 워크플로가 아니라 여기로 보낸다.
+    enhancer_model: str = ""
 
 
 @dataclass
@@ -443,8 +451,13 @@ class GeurimGyeolEngine:
         return None
 
     def model_options(self) -> dict[str, list[str]]:
-        """ComfyUI 의 모델 폴더별 목록 (v0.2 §5.3)."""
-        folders = ["diffusion_models", "checkpoints", "text_encoders", "vae", "loras"]
+        """ComfyUI 의 모델 폴더별 목록 (v0.2 §5.3).
+
+        조회할 폴더는 설정(config/comfyui.json 의 model_folders)을 따른다.
+        여기서 목록을 박아 두면 설정에 새 폴더를 더해도 반영되지 않는다.
+        (프롬프트 인핸서의 LLM 폴더가 그래서 빠졌었다)
+        """
+        folders = list(self.config.model_folders or _DEFAULT_MODEL_FOLDERS)
         try:
             models = self._run(self.client.get_all_models())
         except Exception as exc:
@@ -527,6 +540,7 @@ class GeurimGyeolEngine:
         seed: int = -1,
         extra: dict[str, Any] | None = None,
         enhance_prompt: bool = True,
+        enhancer_model: str = "",
     ) -> GenerationRequest:
         """현재 선택된 워크플로를 쓰는 생성 요청을 만든다."""
         wf = self.active_workflow
@@ -545,6 +559,7 @@ class GeurimGyeolEngine:
             seed=seed,
             extra=dict(extra or {}),
             enhance_prompt=enhance_prompt,
+            enhancer_model=enhancer_model,
         )
 
     def _payload(self, request: GenerationRequest) -> tuple[Workflow, dict]:
@@ -586,7 +601,7 @@ class GeurimGyeolEngine:
         # 프롬프트 인핸서 우회 (GUI 의 스위치가 꺼져 있으면)
         payload = wf.apply(values)
         if request.enhance_prompt:
-            self._ensure_enhancer(wf, payload)
+            self._ensure_enhancer(wf, payload, request.enhancer_model)
         else:
             payload = self._bypass_enhancer(payload)
         return wf, payload
@@ -654,12 +669,16 @@ class GeurimGyeolEngine:
             )
         return True, f"인핸서 사용 가능 ({node_class})"
 
-    def _ensure_enhancer(self, wf: Workflow, payload: dict) -> None:
+    def _ensure_enhancer(self, wf: Workflow, payload: dict,
+                       enhancer_model: str = "") -> None:
         """인핸서 노드가 없으면 실행 그래프에 직접 추가한다.
 
         워크플로에 이미 있으면 아무것도 하지 않는다.
         추가하지 못하면 원본 프롬프트로 그대로 생성한다 —
         조용히 LLM 을 돌릴 수는 없으므로, 못 넣는 게 맞아 보인다.
+
+        enhancer_model 은 사용자가 고른 GGUF 파일명이다.
+        워크플로에 노드가 없으니 값을 받을 곳이 없으므로 여기서 물려받는다.
 
         Returns:
             None
@@ -680,6 +699,9 @@ class GeurimGyeolEngine:
                 wf.name,
             )
             return
+        if enhancer_model:
+            # 사용자가 고른 파일만 쓴다. ComfyUI 는 목록에 없는 값을 거부한다.
+            model_inputs = {**model_inputs, "local_model": enhancer_model}
         self._inject_enhancer(
             wf, payload, node_class, defaults, model_inputs, *target
         )

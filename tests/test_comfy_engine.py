@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+from app.comfy.workflow import Workflow, infer_parameters
 from app.engine.comfy_engine import GeurimGyeolEngine, _is_enhancer
 from app.comfy.client import ComfyClient, SystemInfo
 from app.comfy.config import ComfyUIConfig
@@ -1140,3 +1141,105 @@ def test_repeated_calls_work_across_event_loops():
     second = asyncio.run(_touch())
     assert second is not first, "루프가 바뀌면 새 클라이언트가 만들어져야 한다"
     assert not second.is_closed
+
+
+def test_model_options_follows_config_folders(monkeypatch, tmp_path):
+    """회귀: 조회할 폴더가 코드에 박혀 있어 설정의 model_folders 를 무시했다.
+
+    그래서 프롬프트 인핸서의 LLM(GGUF) 폴더가 목록에 없었고,
+    GGUF 칸에 '설치된 파일 없음' 이 떴다.
+    """
+    async def fake_get_all_models(self):
+        return {
+            "checkpoints": ["a.safetensors"],
+            "diffusion_models": ["b.safetensors"],
+            "vae": ["c.safetensors"],
+            "loras": ["d.safetensors"],
+            "text_encoders": ["e.safetensors"],
+            "LLM": ["qwen_pe_t2i_heretic-Q4_K_M.gguf"],
+            "upscale_models": ["f.pth"],   # 설정에 없는 폴더
+        }
+
+    monkeypatch.setattr(
+        "app.comfy.client.ComfyClient.get_all_models", fake_get_all_models
+    )
+    engine = GeurimGyeolEngine(tmp_path)
+    options = engine.model_options()
+
+    assert options["LLM"] == ["qwen_pe_t2i_heretic-Q4_K_M.gguf"], (
+        f"설정에 있는 LLM 폴더가 빠졌다: {sorted(options)}"
+    )
+    assert "upscale_models" not in options, "설정에 없는 폴더는 넣지 않는다"
+
+
+def _injection_only_workflow() -> Workflow:
+    """인접어 노드가 없고, 끼워 넣을 자리(문자열 프롬프트)만 있는 워크플로."""
+    data = {
+        "1": {"class_type": "CLIPLoader",
+              "inputs": {"clip_name": "b.safetensors"}},
+        "4": {"class_type": "TextEncodeQwenImage21",
+              "inputs": {"prompt": "고양이", "clip": ["1", 0]}},
+    }
+    return Workflow(
+        path=Path("메모리.json"), name="메모리", description="",
+        output_node="", prompt=data, parameters=infer_parameters(data),
+    )
+
+
+def _stub_enhancer_node(monkeypatch, engine, default_model="pe.gguf"):
+    """인접어 노드가 설치돼 있는 척 만든다.
+
+    실제 노드 종류를 찾는 일은 object_info 조회라 네트워크가 필요하다.
+    여기서 검증할 것은 '주입되는 값' 이므로 노드 종류는 고정한다.
+    """
+    monkeypatch.setattr(
+        type(engine),
+        "enhancer_defaults",
+        lambda self: (
+            "QwenImage21PromptEnhancerT8",
+            {"language": "ko"},
+            {"local_model": default_model},
+        ),
+    )
+
+
+def test_chosen_enhancer_model_reaches_injected_node(enhancer_engine, monkeypatch):
+    """회귀: 인접어 노드가 없는 워크플로에는 고른 GGUF 를 넘길 곳이 없었다.
+
+    노드는 생성 시점에 자동으로 끼워 넣는데, 그때 쓸 모델은 항상
+    '설치된 첫 번째' 였다. 이제 사용자가 고른 값이 그대로 들어간다.
+    """
+    engine = enhancer_engine
+    _stub_enhancer_node(monkeypatch, engine)
+    wf = _injection_only_workflow()
+    payload = json.loads(json.dumps(wf.prompt))
+    assert _is_enhancer("QwenImage21PromptEnhancerT8")
+
+    engine._ensure_enhancer(wf, payload, "내가_고른.gguf")
+
+    injected = [
+        (nid, n) for nid, n in payload.items()
+        if _is_enhancer(n.get("class_type"))
+    ]
+    assert injected, "인접어 노드가 주입되지 않았다"
+    node_id, node = injected[0]
+    assert node["inputs"]["local_model"] == "내가_고른.gguf", (
+        f"선택한 GGUF 가 통하지 않았다: {node['inputs']['local_model']!r}"
+    )
+    assert node["inputs"]["prompt"] == "고양이", "원본 프롬프트를 받아야 한다"
+    assert payload["4"]["inputs"]["prompt"] == [node_id, 0], (
+        "텍스트 인코더가 인접어 출력을 받아야 한다"
+    )
+
+
+def test_enhancer_model_omitted_keeps_installed_default(enhancer_engine, monkeypatch):
+    """아무것도 고르지 않으면 기존처럼 설치된 첫 번째를 쓴다."""
+    engine = enhancer_engine
+    _stub_enhancer_node(monkeypatch, engine)
+    wf = _injection_only_workflow()
+    payload = json.loads(json.dumps(wf.prompt))
+    engine._ensure_enhancer(wf, payload, "")
+    injected = [
+        n for n in payload.values() if _is_enhancer(n.get("class_type"))
+    ]
+    assert injected[0]["inputs"]["local_model"] == "pe.gguf"
