@@ -745,6 +745,80 @@ def test_enhancer_is_detected_and_bypass_rewires_prompt(enhancer_engine):
     assert off["4"]["inputs"]["prompt"] == "고양이", "우회하면 링크가 풀려야 한다"
 
 
+def test_llm_model_is_recorded_when_enhancer_runs(enhancer_engine, fake_comfy):
+    """인핸서가 돌았으면 LLM 모델명이 메타데이터와 세션에 기록된다.
+
+    회귀 근거: SessionMetadata(llm_model=None) 이 하드코딩되어 있어서
+    실제로 LLM 이 프롬프트를 번역·확장해도 기록은 항상 null 이었다.
+    그래서 화면에 LLM: N/A 로만 떴다.
+    """
+    import json as _json
+
+    engine = enhancer_engine
+    engine.system_info = SystemInfo(online=True, error="")
+    fake_comfy["images"] = [{"filename": "a.png", "subfolder": ""}]
+
+    request = engine.build_request(
+        prompt="고양이", width=64, height=64, steps=4, cfg=4.0, seed=1,
+        enhance_prompt=True,
+    )
+    result = engine.generate(request)
+
+    assert result.success is True, result.error
+    assert result.metadata["llm_model"] == "pe.gguf", (
+        f"인핸서 모델명이 기록돼야 한다: {result.metadata['llm_model']!r}"
+    )
+
+    session_dir = engine.sessions.list_sessions()[0]
+    session = _json.loads((session_dir / "session.json").read_text(encoding="utf-8"))
+    assert session["llm_model"] == "pe.gguf"
+
+    output_json = sorted(engine.outputs.outputs_root.rglob("*.json"))
+    out = _json.loads(output_json[0].read_text(encoding="utf-8"))
+    assert out["llm_model"] == "pe.gguf"
+
+
+def test_llm_model_is_none_when_enhancer_is_bypassed(enhancer_engine, fake_comfy):
+    """인핸서를 껐으면 LLM 모델명은 None 이다 (LLM 이 안 돌았으므로).
+
+    회귀 방지: 인핸서 노드를 payload 에서 지웠는데도 워크플로 기본값을
+    그대로 읽어 "돌았지만 안 쓰였다" 는 잘못된 기록을 남길 수 있다.
+    """
+    engine = enhancer_engine
+    engine.system_info = SystemInfo(online=True, error="")
+    fake_comfy["images"] = [{"filename": "a.png", "subfolder": ""}]
+
+    request = engine.build_request(
+        prompt="고양이", width=64, height=64, steps=4, cfg=4.0, seed=1,
+        enhance_prompt=False,
+    )
+    result = engine.generate(request)
+
+    assert result.success is True, result.error
+    assert result.metadata["llm_model"] is None
+
+
+def test_enhancer_model_prefers_filled_input_in_priority_order():
+    """인핸서 모델명은 채워진 입력 중 우선순위 순으로 고른다.
+
+    회귀 근거: api_mode 가 워크플로마다 다른 한국어 문자열이라
+    어느 모델을 썼는지 알려줄 수 없다. 값이 있는 첫 항목을 쓴다.
+    """
+    from app.engine.comfy_engine import _enhancer_model
+
+    payload = {"14": {"class_type": "QwenImage21PromptEnhancerT8", "inputs": {
+        "custom_model": "", "local_model": "pe.gguf",
+        "ai_workshop_model": "gemini-3.5-flash",
+    }}}
+    assert _enhancer_model(payload) == "pe.gguf"
+
+    payload["14"]["inputs"]["custom_model"] = "my-model"
+    assert _enhancer_model(payload) == "my-model"
+
+    # 인핸서 노드가 없으면 (스위치를 꺼서 제거된 경우) None
+    assert _enhancer_model({"6": {"class_type": "KSampler", "inputs": {}}}) is None
+
+
 def test_lora_strength_is_injectable_as_float(enhancer_engine):
     """LoRA 강도(float)가 워크플로에 그대로 주입된다."""
     engine = enhancer_engine

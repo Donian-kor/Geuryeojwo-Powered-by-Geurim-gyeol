@@ -25,11 +25,40 @@ from .session.manager import SessionManager, SessionMetadata
 _OUTPUT_NODES = ("SaveImage", "PreviewImage", "SaveAnimatedWEBP", "SaveAnimatedPNG")
 # 프롬프트 인핸서 노드로 간주하는 class_type
 _ENHANCER_TYPES = ("PromptEnhance", "PromptEnhancer", "PromptExpander")
+# 인핸서 노드에서 LLM 모델명을 읽어올 입력 키 (우선순위 순).
+# 인핸서는 API 모드 / 로컬 GGUF / 사용자 지정 모델을 지원하는데,
+# 어느 쪽이 실제로 쓰였는지는 api_mode 라는 자유 입력 문자열에만 있고
+# 그 문자열은 워크플로마다 한국어 표현이 달라 파싱할 수 없다.
+# 그래서 "값이 채워져 있는 첫 번째" 를 모델명으로 기록한다.
+_ENHANCER_MODEL_INPUTS = ("custom_model", "local_model", "ai_workshop_model")
 
 
 def _is_enhancer(class_type: str) -> bool:
     """프롬프트 인핸서 노드인지 판단한다."""
     return any(marker in class_type for marker in _ENHANCER_TYPES)
+
+
+def _enhancer_model(payload: dict) -> str | None:
+    """실제로 실행된 인핸서의 LLM 모델명을 payload 에서 읽는다.
+
+    인핸서 스위치를 끈 경우 _bypass_enhancer 가 노드를 payload 에서
+    지우므로 인핸서를 찾을 수 없고 None 이 나온다.
+    None 은 "LLM 이 안 돌았다" 는 뜻이므로 그대로 기록하면 된다.
+
+    Returns:
+        str | None: 모델명, 또는 인핸서를 실행하지 않았으면 None
+    """
+    for node in (payload or {}).values():
+        if not isinstance(node, dict):
+            continue
+        if not _is_enhancer(node.get("class_type", "")):
+            continue
+        inputs = node.get("inputs") or {}
+        for key in _ENHANCER_MODEL_INPUTS:
+            value = inputs.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
 
 
 @dataclass
@@ -598,6 +627,10 @@ class GeurimGyeolEngine:
         # 실제 전송된 값에서 메타데이터를 읽는다
         applied = self._applied_values(wf, payload)
 
+        # 프롬프트를 다듬어 준 LLM 모델명.
+        # 인핸서 스위치를 끈 경우 노드가 payload 에 없어서 None 이 된다.
+        llm_model = _enhancer_model(payload)
+
         # 인핸서가 실제로 만든 프롬프트를 history 에서 읽는다 (B4).
         # 인핸서 노드(14)의 text 출력이 곧 이미지 모델에 들어간 값이다.
         original_prompt = applied["prompt"] or request.prompt
@@ -631,6 +664,7 @@ class GeurimGyeolEngine:
             sampler=applied["sampler"],
             scheduler=applied["scheduler"],
             elapsed_seconds=round(elapsed, 2),
+            llm_model=llm_model,
         )
 
         # 1) outputs/ 에 저장
@@ -653,7 +687,7 @@ class GeurimGyeolEngine:
                 original_prompt=original_prompt,
                 enhanced_prompt=enhanced_prompt,
                 negative_prompt=applied["negative"],
-                llm_model=None,
+                llm_model=llm_model,
                 image_model=wf.name,
                 seed=applied["seed"],
                 width=applied["width"],
