@@ -5,7 +5,7 @@
 여기 적는 내용은 **커밋과 테스트로 확인된 것**만 적는다.
 
 - 기준 커밋: `4f14f67`
-- pytest 85개 통과
+- pytest 96개 통과
 - 앱 코드 28개 파일(테스트 포함)
 
 ## 1. 현재 상태
@@ -20,6 +20,8 @@
 | 프롬프트 인핸서 | 동작 — 워크플로 안의 LLM 노드가 담당 |
 | 기록·재생성 | 동작 — History 탭에서 1줄 목록, 클릭 1번으로 미리보기 |
 | GUI 스레드 블로킹 | 해소 — 서버 조회는 백그라운드 스레드 |
+| 모델 설치 판정 | GUI 밖 — `app/comfy/workflow.py` 의 순수 함수 |
+| 위젯 값 → 파라미터 키 변환 | GUI 밖 — `app/comfy/workflow.py` 의 순수 함수 |
 
 ## 2. 해결한 문제
 
@@ -66,11 +68,73 @@ GC 에 맡겨진다.
 | 생성된 이벤트 루프 | 15 | **1** |
 | `shutdown()` 후 닫힘 | — | 1/1 |
 
+### B8 — GUI 비즈니스 로직 분리 (해결)
+
+`main_window.py` 안에 워크플로에 대한 판단이 섞여 있었다. 다섯 개였다.
+
+| 옮긴 것 | 도착지 | 대신 남은 것 |
+|---|---|---|
+| `_MODEL_INPUT_BY_KEY`, `combo_of_input` | `WIDGET_KEY_TO_INPUT`, `input_of` | — |
+| `_installed_models` | `installed_models`, `model_folder` | 1줄 호출 |
+| `_missing_models` | `missing_models` | 1줄 호출 |
+| `_collect_extra` | `collect_extra` | 위젯 값 읽기 |
+
+전부 `app/comfy/workflow.py` 의 순수 함수다. PySide6 를 import 하지 않고,
+`dict` 와 `str` 만 받으므로 GUI 없이 검증된다 — 그 점이 이 이동의 목적이다.
+
+옮기며 버그 하나를 잡았다. 예전 표에는 `sampler` 가 없었다. 그래서
+`by_input.get(combo_of_input(params, "sampler"))` 는 항상 `None` 이었고
+샘플러 선택은 조용히 버려졌다. `sampler` / `scheduler` 를 표에 넣어
+`sampler_name` 으로 조회되게 했다. 회귀 테스트는
+`test_workflow_rules.py::test_collect_extra_maps_widget_keys_to_parameter_keys`.
+
+검증 — GUI에서 값을 바꾼 뒤 실제 payload 까지 도달하는지 확인했다.
+
+| 확인 항목 | 결과 |
+|---|---|
+| `unet` 콤보 변경 → `1.inputs.unet_name` | `FORCED-UNET.safetensors` |
+| `sampler` 콤보 변경 → `6.inputs.sampler_name` | `dpmpp_2m` |
+| 슬라이더 65 → `16.inputs.strength_model` | `0.65` |
+
 ### 구조 이동 (아직 승인되지 않음)
 
 - `app/comfy/` → `app/engine/comfy/`
-- `main_window.py`(827줄) → `pages/ widgets/ controllers/ workers/`
+  - 기능 이득이 거의 없고 import·회귀 위험만 남는다
+- `main_window.py`(806줄) → `pages/ widgets/ controllers/ workers/`
+  - 규칙 판정은 이미 빠져나갔다. 남은 건 위젯 배치와 페인팅이다
 - `app/gui/pages/` 등 자리표시자 폴더는 지금 코드가 없다
+
+### 실제 생성 테스트를 안전하게 돌리는 법
+
+ComfyUI 는 생성할 때 모델을 VRAM/RAM 에 올린다. Qwen-Image 2.1 은
+확산 모델 4GB + 텍스트 인코더 8.9GB + VAE 로 한 번에 약 13GB 이라
+31GB 머신에서는 메모리가 빠듯해지고 ComfyUI 가 먼저 죽는다
+(죽은 로그에는 트레이스백 없이 `Using RAM pressure cache` 만 남고
+Comfy Desktop 가 다시 띄운다).
+
+그래서 실제 생성은 `tools/smoke_generate.py` 로만 한다.
+
+```
+python tools/smoke_generate.py --dry-run       # 안전 검사만 (생성 안 함)
+python tools/smoke_generate.py                 # 가벼운 SDXL (512x512, 4스텝)
+python tools/smoke_generate.py --profile qwen  # 무거운 Qwen 전체 검증
+```
+
+| 안전장치 | 하는 일 |
+|---|---|
+| 실행 전 검사 | 빈 RAM·커밋 여유가 최소치 미만이면 **생성 자체를 시작하지 않음** |
+| 큐 확인 | 진행 중인 생성이 있으면 건드리지 않음 |
+| `/free` 전후 호출 | 시작 전·끝난 뒤(실패해도) 모델을 내려 누적되지 않게 함 |
+| 가벼운 기본값 | SDXL 체크포인트 하나 — Qwen 보다 훨씬 적게 먹음 |
+| 감시 스레드 | 도중 서버가 죽으면 "생성 실패"와 "서버 사망"을 구분해 보고 |
+
+단위 테스트(`pytest`)는 이 경로를 건드리지 않으며 서버에 접속하지도 않는다.
+실측 — 스위트 96개 실행 중 ComfyUI PID 불변, 8188 TCP 연결 0건.
+
+| 프로필 | 설정 | 최소 메모리 | 실측 소비 |
+|---|---|---|---|
+| `sdxl` | 512x512, 4스텝 | 물리 8GB / 커밋 10GB | 약 1.6GB |
+| `qwen` | 1024x1024, 12스텝 | 물리 14GB / 커밋 20GB | 약 13GB |
 
 ### 사소한 것
 
@@ -112,7 +176,7 @@ app/gui/pages/ widgets/ controllers/ workers/
 | VRAM 누락 시 GUI 정상 동작 | 충족 |
 | GUI 네트워크 작업이 메인 스레드를 막지 않음 | 충족 |
 | ComfyUI 통신이 단일 계층에 모임 | **미충족** — `app/comfy/` 에 있음 |
-| GUI 가 pages/widgets/controllers/workers 로 구분됨 | **미충족** |
+| GUI 가 pages/widgets/controllers/workers 로 구분됨 | **미충족** — 위젯 배치만 남음 |
 | 한 세션이 여러 이미지를 담음 | **미충족** — `GenerationResult` 에 단일 `image_path` |
 
 ## 6. 이번 판에서 하지 않은 것

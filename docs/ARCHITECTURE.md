@@ -230,6 +230,22 @@ ComfyUI 응답이 없으면 워크플로 기본값 하나만 표시한다.
 Model 탭에 띄우고 생성을 막는다. 대체하면 사용자는 자신이 무엇을
 생성했는지 알 수 없게 된다.
 
+### 6.6 판정 로직의 위치
+
+모델 설치 여부와 위젯 값의 키 변환은 `app/comfy/workflow.py` 의 순수
+함수다. `main_window.py` 는 위젯 값을 읽어 넘기고 색과 문구만 그린다.
+
+| 함수 | 하는 일 |
+|---|---|
+| `input_of` | 위젯 키 → ComfyUI 입력 이름 |
+| `model_folder` | 파라미터의 `kind` 에서 ComfyUI 폴더 이름 |
+| `installed_models` | 그 폴더에 설치된 파일 목록 |
+| `missing_models` | 선택 중 미설치된 항목 |
+| `collect_extra` | 위젯 값 → {파라미터 키: 값} |
+
+전부 `dict` 와 `str` 만 주고받는다. PySide6 를 import 하지 않으므로
+GUI 없이 검증된다 — `tests/test_workflow_rules.py` 가 그 증거다.
+
 ## 7. 생성 흐름
 
 ```
@@ -295,13 +311,13 @@ app/
   comfy/
     client.py      444줄    ComfyClient · SystemInfo · extract_text_outputs
     config.py      186줄    ComfyUIConfig
-    workflow.py    278줄    Workflow · ParameterSpec · infer_parameters
+    workflow.py    354줄    Workflow · ParameterSpec · infer_parameters · collect_extra
   engine/
     comfy_engine.py 571줄  GeurimGyeolEngine · GenerationRequest/Result
     output/manager.py 172줄  OutputManager · OutputMetadata · next_index
     session/manager.py 258줄 SessionManager · SessionMetadata · _slugify
   gui/
-    main_window.py   827줄  MainWindow · Worker · ComfyInfoWorker · ModelInfoPanel
+    main_window.py   806줄  MainWindow · Worker · ComfyInfoWorker · ModelInfoPanel
     session_browser.py 427줄 HistoryBrowser
     theme/manager.py 193줄  ThemeManager
 
