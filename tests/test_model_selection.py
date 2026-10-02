@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from pathlib import Path
 
 import pytest
 
@@ -333,24 +334,165 @@ def test_checkpoint_combo_lists_installed_models(make_sd_window):
         w.close()
 
 
-def test_unet_combo_disabled_for_sd_workflow(make_sd_window):
-    """SD 워크플로는 확산 모델 폴더를 보지 않는다."""
+def test_unet_row_is_absent_for_sd_workflow(make_sd_window):
+    """회귀: SD 워크플로에는 확산 모델 칸 자체가 없어야 한다.
+
+    B19 전에는 없는 칸을 미리 만들어 두고 '(사용 안 함)' 으로 껐는데,
+    미리 정한 목록으로는 CLIP 이 2~4개인 워크플로를 담을 수 없다.
+    """
     w = make_sd_window("sdA.safetensors")
     try:
-        combo = w.model_combos["unet"]
-        assert combo.isEnabled() is False
-        assert combo.itemText(0) == "(사용 안 함)"
+        assert "unet" not in w.model_combos
+        assert "checkpoint" in w.model_combos
     finally:
         w.close()
 
 
-def test_checkpoint_combo_disabled_for_qwen_workflow(make_window):
-    """회귀: Qwen 워크플로에서는 체크포인트 칸이 꺼져 있어야 한다."""
+def test_checkpoint_row_is_absent_for_qwen_workflow(make_window):
+    """회귀: Qwen 워크플로에는 체크포인트 칸이 없어야 한다."""
     w = make_window("installedA.safetensors")
     try:
-        combo = w.model_combos["checkpoint"]
-        assert combo.isEnabled() is False
-        assert combo.itemText(0) == "(사용 안 함)"
+        assert "checkpoint" not in w.model_combos
+        assert "unet" in w.model_combos
     finally:
         w.close()
+
+
+# --- CLIP 2~4개인 워크플로 (Flux / SD3 / Hunyuan) ------------------------
+
+def _clip_workflow(clip_class: str, count: int) -> dict:
+    """clip_name1..N 을 가진 워크플로를 만든다."""
+    inputs = {f"clip_name{i + 1}": f"clip{i + 1}.safetensors"
+              for i in range(count)}
+    return {
+        "1": {"class_type": "UNETLoader",
+              "inputs": {"unet_name": "u.safetensors"}},
+        "2": {"class_type": clip_class, "inputs": inputs},
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": "v.safetensors"}},
+        "4": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": "고양이", "clip": ["2", 0]}},
+        "5": {"class_type": "EmptyLatentImage",
+              "inputs": {"width": 512, "height": 512, "batch_size": 1}},
+        "6": {"class_type": "KSampler",
+              "inputs": {"seed": 1, "steps": 20, "cfg": 4.0,
+                         "sampler_name": "euler", "scheduler": "simple",
+                         "denoise": 1, "model": ["1", 0],
+                         "positive": ["4", 0], "latent_image": ["5", 0]}},
+        "7": {"class_type": "VAEDecode",
+              "inputs": {"samples": ["6", 0], "vae": ["3", 0]}},
+        "8": {"class_type": "SaveImage", "inputs": {"images": ["7", 0]}},
+    }
+
+
+def _show(window, prompt):
+    from app.comfy.workflow import infer_parameters
+    specs = infer_parameters(prompt)
+    window._setup_models(specs, {})
+    return window
+
+
+def _plain_window(qapp):
+    """네트워크 조회를 전부 막은 빈 MainWindow."""
+    import app.gui.main_window as mw
+
+    async def _fake(self):
+        return SystemInfo(online=True, comfyui_version="0.0.0-test",
+                          device_name="TEST", vram_total_gb=8.0,
+                          vram_free_gb=4.0)
+
+    ComfyClient.get_system_info = _fake
+    GeurimGyeolEngine.model_options = lambda self: dict(SD_OPTIONS)
+    GeurimGyeolEngine.sampler_options = (
+        lambda self: {"sampler": ["euler"], "scheduler": ["normal"]}
+    )
+    GeurimGyeolEngine.online = property(lambda self: True)
+    qapp.processEvents()
+    return mw.MainWindow()
+
+
+@pytest.mark.parametrize("cls,count,expected", [
+    ("DualCLIPLoader", 2, ["clip1", "clip2"]),
+    ("TripleCLIPLoader", 3, ["clip1", "clip2", "clip3"]),
+    ("QuadrupleCLIPLoader", 4, ["clip1", "clip2", "clip3", "clip4"]),
+])
+def test_multi_clip_slots_are_recognized(qapp, cls, count, expected):
+    """회귀: CLIP 이 2~4개인 워크플로는 그만큼 칸이 있어야 한다.
+
+    clips 를 clip_name 으로만 찾던 때는 Flux 워크플로에서 아예 칸이 안 나왔다.
+    """
+    window = _plain_window(qapp)
+    try:
+        _show(window, _clip_workflow(cls, count))
+        for key in expected:
+            assert key in window.model_combos, f"{key} 칸이 없다"
+        assert "clip" not in window.model_combos, "단일 CLIP 칸이 잘못 생겼다"
+    finally:
+        window.close()
+
+
+def test_multi_clip_rows_are_ordered(qapp):
+    """칸이 늘 때도 순서가 흔들리면 선택지가 제자리에서 점프한다."""
+    window = _plain_window(qapp)
+    try:
+        _show(window, _clip_workflow("QuadrupleCLIPLoader", 4))
+        assert list(window._model_labels.values()) == [
+            "확산 모델", "텍스트 인코더 1", "텍스트 인코더 2",
+            "텍스트 인코더 3", "텍스트 인코더 4", "VAE",
+        ]
+        assert list(window.model_combos) == [
+            "unet", "clip1", "clip2", "clip3", "clip4", "vae",
+        ]
+    finally:
+        window.close()
+
+
+def test_switching_workflows_rebuilds_rows(qapp, tmp_path, project_root):
+    """워크플로를 바꾸면 칸도 그에 맞춰 바뀐다."""
+    import app.gui.main_window as mw
+
+    root = tmp_path / "multi"
+    for name in ("config", "workflows", "outputs", "sessions"):
+        (root / name).mkdir(parents=True, exist_ok=True)
+    shutil.copy(project_root / "config" / "comfyui.json",
+                root / "config" / "comfyui.json")
+    (root / "workflows" / "sd.json").write_text(
+        json.dumps({"name": "SD", "prompt": _sd_prompt()}, ensure_ascii=False),
+        encoding="utf-8")
+    (root / "workflows" / "flux.json").write_text(
+        json.dumps({"name": "Flux",
+                    "prompt": _clip_workflow("DualCLIPLoader", 2)},
+                   ensure_ascii=False),
+        encoding="utf-8")
+    mw.ROOT = root
+
+    window = _plain_window(qapp)
+    try:
+        _show(window, _sd_prompt())
+        assert "checkpoint" in window.model_combos
+        assert "clip1" not in window.model_combos
+        _show(window, _clip_workflow("DualCLIPLoader", 2))
+        assert "checkpoint" not in window.model_combos
+        assert "clip1" in window.model_combos
+    finally:
+        window.close()
+
+
+def _sd_prompt() -> dict:
+    return {
+        "1": {"class_type": "CheckpointLoaderSimple",
+              "inputs": {"ckpt_name": "sdA.safetensors"}},
+        "2": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": "고양이", "clip": ["1", 1]}},
+        "3": {"class_type": "EmptyLatentImage",
+              "inputs": {"width": 512, "height": 512, "batch_size": 1}},
+        "4": {"class_type": "KSampler",
+              "inputs": {"seed": 1, "steps": 20, "cfg": 7.0,
+                         "sampler_name": "euler", "scheduler": "normal",
+                         "denoise": 1, "model": ["1", 0],
+                         "positive": ["2", 0], "negative": ["2", 0],
+                         "latent_image": ["3", 0]}},
+        "5": {"class_type": "VAEDecode",
+              "inputs": {"samples": ["4", 0], "vae": ["1", 2]}},
+        "6": {"class_type": "SaveImage", "inputs": {"images": ["5", 0]}},
+    }
 

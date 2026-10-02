@@ -29,6 +29,17 @@ ROOT = Path(__file__).resolve().parents[2]
 
 GB = 1024 ** 3
 
+# Model 탭의 모델 칸 표시 순서.
+# 워크플로마다 쓰는 칸이 달라 화면도 그때그때 만들어야 하지만,
+# 만든 순서가 매번 달라지면 선택지가 제자리에서 점프하므로 고정한다.
+_MODEL_ROW_ORDER = {
+    "checkpoint": 0, "unet": 1,
+    "clip": 2, "clip1": 3, "clip2": 4, "clip3": 5, "clip4": 6,
+    "text_encoder": 7, "vae": 8,
+    "lora": 9, "existing_lora": 10, "config": 11,
+    "upscale_model": 12, "sam_model": 13,
+}
+
 # 단계별 색. 판정은 app/engine/health.py 가 하고, 색은 여기서 정한다.
 # (engine 은 PySide6 를 모르므로 색을 알 수 없다)
 _LEVEL_QSS = {
@@ -500,24 +511,9 @@ class MainWindow(QWidget):
         self._model_warning.setWordWrap(True)
         self._model_warning.setStyleSheet("color:#ff6b6b; font-size:12px;")
         self._model_warning.setVisible(False)
-        for row, (key, caption) in enumerate(
-            # 체크포인트(SD 계열) 와 확산 모델(Qwen 계열) 은 서로 다른 폴더다.
-            # 한 워크플로는 둘 중 하나만 쓰므로 쓰지 않는 쪽은 비활성화된다.
-            (("checkpoint", "체크포인트"),
-             ("unet", "확산 모델"), ("clip", "텍스트 인코더"),
-             ("vae", "VAE"), ("lora", "LoRA"))
-        ):
-            combo=QComboBox(); combo.setMinimumWidth(120)
-            # 모델이 많으면 드롭다운이 화면을 다 먹는다.
-            # 8줄까지만 보여주고 나머지는 스크롤로 넘긴다.
-            combo.setMaxVisibleItems(8)
-            self.model_combos[key]=combo
-            self._model_labels[key]=caption
-            combo.currentIndexChanged.connect(
-                lambda _i, k=key: self._update_model_warning(k)
-            )
-            ml.addWidget(QLabel(caption), row, 0)
-            ml.addWidget(combo, row, 1)
+        # 행은 워크플로마다 다르므로 나중에 만든다. (_rebuild_model_rows)
+        # CLIP 은 1개일 수도 4개일 수도 있어 목록을 미리 정할 수 없다.
+        self._model_grid=ml
         layout.addWidget(self.model_boxes)
         layout.addWidget(self._model_warning)
 
@@ -525,6 +521,47 @@ class MainWindow(QWidget):
         layout.addStretch()
         self.workflow.currentIndexChanged.connect(lambda _: self._on_workflow_changed())
         return tab
+
+    # --- 모델 칸(행) ----------------------------------------------------
+
+    def _rebuild_model_rows(self, params: dict) -> None:
+        """워크플로가 실제로 쓰는 모델 칸만 남긴다.
+
+        회귀 근거: 칸을 미리 정해 두면 두 가지 문제가 생긴다.
+        (1) 체크포인트형 워크플로를 못 골랐다 — ckpt_name 에 칸이 없었다
+        (2) CLIP 이 2~4개인 워크플로(Flux/SD3/Hunyuan) 는 칸이 없다
+        미리 정할 수 없는 목록이므로 워크플로에 맞춰 만든다.
+        """
+        wanted = [key for key, spec in params.items()
+                  if str(spec.kind).startswith("model:")]
+        # 순서가 흔들리면 화면이 제자리에서 점프하므로 고정한다
+        wanted.sort(key=lambda k: _MODEL_ROW_ORDER.get(k, 99))
+        if set(wanted) == set(self.model_combos):
+            return
+
+        grid = self._model_grid
+        while grid.count():                       # 기존 행 걷어낸다
+            item = grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+        self.model_combos.clear()
+        self._model_labels.clear()
+
+        for row, key in enumerate(wanted):
+            caption = params[key].label or key
+            combo = QComboBox()
+            combo.setMinimumWidth(120)
+            # 모델이 많으면 드롭다운이 화면을 다 먹는다.
+            # 8줄까지만 보여주고 나머지는 스크롤로 넘긴다.
+            combo.setMaxVisibleItems(8)
+            combo.currentIndexChanged.connect(
+                lambda _i, k=key: self._update_model_warning(k)
+            )
+            self.model_combos[key] = combo
+            self._model_labels[key] = caption
+            grid.addWidget(QLabel(caption), row, 0)
+            grid.addWidget(combo, row, 1)
 
     # --- 워크플로 가져오기 ------------------------------------------------
 
@@ -1091,6 +1128,8 @@ class MainWindow(QWidget):
             {key: combo.currentText() for key, combo in self.model_combos.items()}
             if preserve_selection else {}
         )
+        # 칸을 먼저 만든다. 워크플로마다 쓰는 칸이 다르다. (B19)
+        self._rebuild_model_rows(params)
         for key, combo in self.model_combos.items():
             combo.blockSignals(True)
             combo.clear()
