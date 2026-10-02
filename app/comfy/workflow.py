@@ -321,6 +321,14 @@ _MODEL_FOLDERS = {
     "unet_name": "diffusion_models", "ckpt_name": "checkpoints",
     "clip_name": "text_encoders", "vae_name": "vae", "lora_name": "loras",
 }
+# 파라미터 키 -> (키, 화면 라벨)
+_MODEL_LABELS = {
+    "lora_name": ("lora", "LoRA"),
+    "unet_name": ("unet", "확산 모델"),
+    "ckpt_name": ("checkpoint", "체크포인트"),
+    "clip_name": ("clip", "텍스트 인코더"),
+    "vae_name": ("vae", "VAE"),
+}
 
 # 프롬프트를 실제로 "받아" 다음 노드로 넘기는 노드.
 # 이름이 TextEncode 로 시작하지 않아도 (인핸서 등) 후보가 된다.
@@ -423,21 +431,28 @@ def infer_parameters(prompt: dict) -> dict[str, ParameterSpec]:
             )
 
     # 5) 모델 선택도 GUI 로 노출
-    for node_id, node in prompt.items():
-        for input_name, value in (node.get("inputs") or {}).items():
-            if isinstance(value, list) or input_name not in _MODEL_INPUTS:
-                continue
-            key, label = {
-                "lora_name": ("lora", "LoRA"),
-                "unet_name": ("unet", "확산 모델"),
-                "ckpt_name": ("checkpoint", "체크포인트"),
-                "clip_name": ("clip", "텍스트 인코더"),
-                "vae_name": ("vae", "VAE"),
-            }[input_name]
-            specs[key] = ParameterSpec(
-                key, node_id, input_name, label,
-                f"model:{_MODEL_FOLDERS[input_name]}",
-            )
+    #    같은 종류 로더가 여럿이면 실제로 쓰이는 것을 고른다. (B18)
+    for input_name in _MODEL_INPUTS:
+        values = {
+            node_id: (node.get("inputs") or {}).get(input_name)
+            for node_id, node in prompt.items()
+            if input_name in (node.get("inputs") or {})
+        }
+        # 링크로 물린 값은 고를 수 없다.
+        candidates = [
+            nid for nid, v in values.items() if not isinstance(v, list)
+        ]
+        if not candidates:
+            continue
+        # 이름이 비어 있는 로더는 고를 것이 없다. 값이 있는 것이 있으면 밀어낸다.
+        filled = [nid for nid in candidates if values[nid]]
+        candidates = filled or candidates
+        node_id = _pick_loader(candidates, prompt, sampler_nodes)
+        key, label = _MODEL_LABELS[input_name]
+        specs[key] = ParameterSpec(
+            key, node_id, input_name, label,
+            f"model:{_MODEL_FOLDERS[input_name]}",
+        )
     return specs
 
 
@@ -529,6 +544,49 @@ def _find_sampler_nodes(prompt: dict) -> set[str]:
     return found or by_class
 
 
+def _downstream_index(prompt: dict) -> dict[str, list[str]]:
+    """노드 ID -> 그 노드의 출력을 받는 노드 목록.
+
+    API 형식에는 '입력'만 적혀 있어서 반대 방향을 만들어야 한다.
+    _upstream( SaveImage ) 로 샘플러를 찾는 것과는 반대 방향이다.
+    """
+    result: dict[str, list[str]] = {}
+    for node_id, node in (prompt or {}).items():
+        for value in (node.get("inputs") or {}).values():
+            if (isinstance(value, list) and len(value) == 2
+                    and isinstance(value[0], str) and value[0] != node_id):
+                result.setdefault(value[0], []).append(node_id)
+    return result
+
+
+def _distance_to_sampler(node_id: str, forward: dict[str, list[str]],
+                         sampler_nodes: set[str], limit: int = 8) -> int:
+    """후보에서 샘플러까지 내려가는 최단 경로 길이. 닿지 않으면 99.
+
+    회귀 근거: 예전에는 _upstream( 후보 ) 로 입구를 따라 올라갔다.
+    후보에서 입구를 따라가면 샘플러로 갈 수 없어 늘 99 가 났고,
+    '실제로 쓰이는 노드'를 고르는 기능이 사실은 동작하지 않았다.
+    후보가 하나뿐인 워크플로에서만 문제가 드러나지 않았다.
+
+    예: LoRA 체인 1 -> 5 -> 6 -> 7 -> KSampler(9) 에서 7 의 거리는 1,
+    5 는 3 이다. 끝에 붙은 LoRA 가 실제로 쓰이는 것이다.
+    """
+    seen = {node_id}
+    stack = [(node_id, 0)]
+    while stack:
+        cur, depth = stack.pop()
+        if depth > limit:
+            continue
+        if cur in sampler_nodes and cur != node_id:
+            return depth
+        for nxt in forward.get(cur, ()):
+            if nxt in seen:
+                continue
+            seen.add(nxt)
+            stack.append((nxt, depth + 1))
+    return 99
+
+
 def _pick_prompt_candidate(
     prompt: dict,
     candidates: list[tuple[str, str]],
@@ -539,22 +597,29 @@ def _pick_prompt_candidate(
     KSampler 쪽으로 직접 연결된 후보가 가장 확실하다.
     예: 인핸서(14) -> TextEncode(4) -> KSampler(6) 구조라면 '14' 를 고른다.
     """
-    def distance_to_sampler(node_id: str, limit: int = 8) -> int:
-        """KSampler 로 향하는 최단 경로 길이."""
-        seen: set[str] = set()
-        stack = [(node_id, 0)]
-        while stack:
-            cur, depth = stack.pop()
-            if cur in seen or depth > limit:
-                continue
-            seen.add(cur)
-            if cur in sampler_nodes and cur != node_id:
-                return depth
-            for nxt in _upstream(cur, prompt):
-                stack.append((nxt, depth + 1))
-        return 99
-
+    forward = _downstream_index(prompt)
     node_id, input_name = min(
-        candidates, key=lambda c: distance_to_sampler(c[0])
+        candidates,
+        key=lambda c: _distance_to_sampler(c[0], forward, sampler_nodes),
     )
     return ParameterSpec("positive", node_id, input_name, "프롬프트", "text")
+
+
+def _pick_loader(candidates: list[str], prompt: dict,
+                 sampler_nodes: set[str]) -> str:
+    """같은 종류 로더가 여럿이면 실제로 쓰이는 것을 고른다.
+
+    회귀 근거: CLIP 로더를 specs["clip"] 에 덮어쓰면서 '나중 노드가 승' 이었다.
+    CLIP 로더가 둘이면(본용 + 인핸서용) 인핸서가 남으면
+    실제로 그림을 만드는 본용 CLIP 을 고를 수단이 사라졌다.
+
+    실제로 쓰이는 로더는 샘플러로 흘러 들어간다. 거리가 가까운 순으로 고르고,
+    아무 데도 연결 안 된 로더는 99 로 밀려 끝에 선다.
+    """
+    if len(candidates) == 1:
+        return candidates[0]
+    forward = _downstream_index(prompt)
+    return min(
+        candidates,
+        key=lambda nid: _distance_to_sampler(nid, forward, sampler_nodes),
+    )

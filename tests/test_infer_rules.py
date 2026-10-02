@@ -16,7 +16,10 @@
 """
 from __future__ import annotations
 
-from app.comfy.workflow import Workflow, infer_parameters, resolve_constant
+from app.comfy.workflow import (
+    Workflow, _distance_to_sampler, _downstream_index, infer_parameters,
+    resolve_constant,
+)
 
 
 # --- 픽스처 --------------------------------------------------------------
@@ -184,6 +187,106 @@ def test_resolve_constant_stops_at_depth_limit():
 def test_resolve_constant_needs_two_element_link():
     assert resolve_constant({}, ["only"]) is None
     assert resolve_constant({}, ["a", 0, 1]) is None
+
+
+# --- 4. 로더 고르기 ----------------------------------------------------
+
+def _sampler_wf(extra_nodes: dict, chain: list[str]) -> dict:
+    """KSampler(9) 로 이어지는 워크플로를 만든다. chain 은 로더 번호 목록."""
+    nodes: dict = {}
+    previous = None
+    for number in chain:
+        nodes[number] = {
+            "class_type": "LoraLoader",
+            "inputs": {"lora_name": f"{number}.safetensors",
+                       "model": [previous, 0] if previous else ["1", 0]},
+        }
+        previous = number
+    nodes["1"] = {"class_type": "UNETLoader",
+                  "inputs": {"unet_name": "u.safetensors"}}
+    nodes["9"] = {"class_type": "KSampler",
+                  "inputs": {"seed": 1, "steps": 8, "cfg": 1.0,
+                             "model": [previous, 0], "positive": ["30", 0]}}
+    nodes["30"] = {"class_type": "CLIPTextEncode",
+                   "inputs": {"text": "고양이", "clip": ["10", 0]}}
+    nodes["40"] = {"class_type": "VAEDecode",
+                   "inputs": {"samples": ["9", 0], "vae": ["1", 0]}}
+    nodes["50"] = {"class_type": "SaveImage", "inputs": {"images": ["40", 0]}}
+    nodes["10"] = {"class_type": "CLIPLoader",
+                   "inputs": {"clip_name": "clip.safetensors", "type": "qwen_image"}}
+    nodes.update(extra_nodes)
+    return nodes
+
+
+def test_downstream_index_points_to_consumers():
+    prompt = {"a": {"class_type": "X", "inputs": {"in": ["b", 0]}},
+              "b": {"class_type": "Y", "inputs": {}}}
+    assert _downstream_index(prompt)["b"] == ["a"]
+
+
+def test_distance_walks_toward_sampler():
+    """회귀: 예전엔 입구를 따라 올라가서 항상 99 였다.
+
+    후보에서 샘플러로 '내려가야' 거리가 줄어든다.
+    """
+    prompt = _sampler_wf({}, ["5", "6", "7"])
+    forward = _downstream_index(prompt)
+    samplers = {"9"}
+    assert _distance_to_sampler("7", forward, samplers) == 1
+    assert _distance_to_sampler("6", forward, samplers) == 2
+    assert _distance_to_sampler("5", forward, samplers) == 3
+
+
+def test_unreachable_node_has_max_distance():
+    prompt = _sampler_wf({"99": {"class_type": "LoraLoader",
+                                 "inputs": {"lora_name": "orphan.safetensors"}}},
+                         ["5"])
+    forward = _downstream_index(prompt)
+    assert _distance_to_sampler("99", forward, {"9"}) == 99
+
+
+def test_last_lora_in_chain_is_picked():
+    """LoRA 체인에서 샘플러에 가장 가까운(=실제 쓰는) LoRA 를 고른다."""
+    specs = infer_parameters(_sampler_wf({}, ["5", "6", "7"]))
+    assert specs["lora"].node == "7"
+
+
+def test_orphan_loader_loses_to_used_one():
+    """인핸서 전용 로더(어디에도 안 연결)는 밀려나야 한다."""
+    prompt = _sampler_wf({"20": {"class_type": "CLIPLoader",
+                                 "inputs": {"clip_name": "enhancer.safetensors",
+                                            "type": "flux2"}}}, [])
+    specs = infer_parameters(prompt)
+    assert specs["clip"].node == "10", "본용 CLIP 이 밀려났다"
+
+
+def test_single_loader_is_kept_as_is():
+    specs = infer_parameters(_sampler_wf({}, []))
+    assert specs["clip"].node == "10"
+    assert specs["unet"].node == "1"
+
+
+def test_empty_model_name_loses_to_filled_one():
+    """이름이 빈 로더는 고를 것이 없다. 값이 있는 쪽을 고른다."""
+    prompt = _sampler_wf({"20": {"class_type": "CLIPLoader",
+                                 "inputs": {"clip_name": "", "type": "flux2"}}}, [])
+    specs = infer_parameters(prompt)
+    assert specs["clip"].node == "10"
+
+
+def test_all_empty_still_exposes_the_slot():
+    """전부 비었어도 칸은 남긴다. 없으면 고를 곳이 사라진다."""
+    prompt = _sampler_wf({}, [])
+    prompt["10"]["inputs"]["clip_name"] = ""
+    specs = infer_parameters(prompt)
+    assert "clip" in specs
+
+
+def test_model_slot_labels_unchanged():
+    specs = infer_parameters(_sampler_wf({}, []))
+    assert specs["unet"].label == "확산 모델"
+    assert specs["clip"].label == "텍스트 인코더"
+    assert specs["unet"].kind == "model:diffusion_models"
 
 
 def _load(prompt: dict) -> Workflow:
