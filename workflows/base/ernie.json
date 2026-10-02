@@ -1,7 +1,8 @@
 {
-  "name": "기본 · ERNIE",
-  "description": "ERNIE 계열 기본 워크플로. 체크포인트 하나만 필요합니다.",
+  "name": "기본 · ERNIE (Base)",
+  "description": "ERNIE-Image Base 모델용. 50스텝 / cfg 4.0 이 정답값입니다. (Turbo 는 ernie-turbo.json)",
   "family": "ernie",
+  "variant": "base",
   "output_node": "7",
   "prompt": {
     "1": {
@@ -30,7 +31,7 @@
     "5": {
       "class_type": "KSampler",
       "inputs": {
-        "seed": 0, "steps": 9, "cfg": 1.0,
+        "seed": 0, "steps": 50, "cfg": 4.0,
         "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0,
         "model": ["1", 0], "positive": ["2", 0], "negative": ["3", 0],
         "latent_image": ["4", 0]

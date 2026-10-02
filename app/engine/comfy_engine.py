@@ -170,6 +170,49 @@ def _enhancer_model(payload: dict) -> str | None:
     return None
 
 
+def _pick_enhanced_prompt(
+    wf: Workflow,
+    history: dict | None,
+    prompt_id: str | None,
+    fallback: str,
+) -> str:
+    """이미지에 실제로 들어간 프롬프트를 고른다.
+
+    인핸서를 켜면 그 노드의 출력이 곧 이미지 모델에 들어간 값이다.
+    껐으면 history 에 남는 텍스트 중 positive 로 연결된 노드의 것을 쓴다.
+
+    아무 텍스트나 고르면 안 된다. positive 와 negative 가 별도
+    CLIPTextEncode 인 워크플로에서는 history 순서가 negative 를 먼저
+    주므로, 네거티브 문장이 프롬프트로 기록된다.
+    (ERNIE 기본 워크플로: positive=2, negative=3)
+
+    Args:
+        wf: 실행한 워크플로
+        history: ComfyUI /history 응답
+        prompt_id: 방금 실행한 프롬프트 id
+        fallback: 못 찾았을 때 쓸 값 (원본 프롬프트)
+
+    Returns:
+        str: 이미지 모델에 들어간 프롬프트
+    """
+    if not history or not prompt_id:
+        return fallback
+    texts = extract_text_outputs(history, prompt_id)
+    if not texts:
+        return fallback
+    positive_nodes = {
+        spec.node for spec in wf.parameters.values()
+        if spec.name == "positive" and spec.node
+    }
+    for spec in wf.parameters.values():
+        if spec.input not in ("prompt", "text") or spec.node not in texts:
+            continue
+        if spec.node in positive_nodes:
+            return texts[spec.node]
+        break        # 인핸서 노드. positive 여부와 상관없이 그게 답이다
+    return next(iter(texts.values()))
+
+
 @dataclass
 class GenerationRequest:
     """생성 요청.
@@ -970,24 +1013,11 @@ class GeurimGyeolEngine:
         llm_model = _enhancer_model(payload)
 
         # 인핸서가 실제로 만든 프롬프트를 history 에서 읽는다 (B4).
-        # 인핸서 노드(14)의 text 출력이 곧 이미지 모델에 들어간 값이다.
+        # 인핸서 노드의 text 출력이 곧 이미지 모델에 들어간 값이다.
         original_prompt = applied["prompt"] or request.prompt
-        enhanced_prompt = original_prompt
-        if history and prompt_id:
-            texts = extract_text_outputs(history, prompt_id)
-            if texts:
-                # 인핸서 노드가 있으면 그 출력을, 없으면 첫 텍스트를 쓴다
-                for spec in wf.parameters.values():
-                    if spec.input in ("prompt", "text") and spec.node in texts:
-                        enhanced_prompt = texts[spec.node]
-                        break
-                else:
-                    enhanced_prompt = next(iter(texts.values()))
-                if enhanced_prompt != original_prompt:
-                    self.logger.info(
-                        "인핸서가 만든 프롬프트를 기록합니다 (%d 자)",
-                        len(enhanced_prompt),
-                    )
+        enhanced_prompt = _pick_enhanced_prompt(
+            wf, history, prompt_id, original_prompt,
+        )
 
         metadata = OutputMetadata(
             seed=applied["seed"],

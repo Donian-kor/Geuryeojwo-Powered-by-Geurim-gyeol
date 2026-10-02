@@ -762,6 +762,44 @@ def test_extract_text_outputs_reads_enhancer_result():
     assert "8" not in texts, "이미지 노드는 텍스트 출력이 아니다"
 
 
+def test_metadata_does_not_record_negative_as_prompt(tmp_path):
+    """네거티브 문장이 프롬프트로 기록되지 않는다 (ERNIE 실측 결함).
+
+    회귀 근거: 인핸서를 껐을 때 history 에 남는 텍스트 중 첫 번째를
+    그대로 썼다. ERNIE 기본 워크플로는 positive(2) 와 negative(3) 가
+    별도 CLIPTextEncode 인데 history 에 3 이 먼저 와서, 기록된 프롬프트가
+    "Avoid blurry, low-quality..." 네거티브 문장이 되었다.
+    """
+    from app.comfy.workflow import load_workflow
+    from app.engine.comfy_engine import _pick_enhanced_prompt
+
+    wf = load_workflow(Path(__file__).resolve().parents[1]
+                       / "workflows" / "base" / "ernie.json")
+
+    # history 에 negative(3) 가 positive(2) 보다 먼저 오는 상황
+    history = {"p-1": {"outputs": {
+        "3": {"text": ["Avoid blurry, low-quality, noisy"]},
+        "2": {"text": ["주황 고양이 한 마리"]},
+    }}}
+
+    picked = _pick_enhanced_prompt(wf, history, "p-1",
+                                   fallback="원본 프롬프트")
+    assert picked == "주황 고양이 한 마리", (
+        "negative 문장이 프롬프트로 기록되면 안 된다")
+
+
+def test_metadata_falls_back_to_original_prompt(tmp_path):
+    """history 에 텍스트가 없으면 원본 프롬프트를 그대로 쓴다."""
+    from app.comfy.workflow import load_workflow
+    from app.engine.comfy_engine import _pick_enhanced_prompt
+
+    wf = load_workflow(Path(__file__).resolve().parents[1]
+                       / "workflows" / "base" / "ernie.json")
+    assert _pick_enhanced_prompt(wf, None, None, "원본") == "원본"
+    assert _pick_enhanced_prompt(
+        wf, {"p-1": {"outputs": {}}}, "p-1", "원본") == "원본"
+
+
 def test_metadata_records_original_and_enhanced_prompt_separately(tmp_path):
     """원본 프롬프트와 최종 프롬프트가 구분되어 저장된다 (§12 시드 재현성).
 
