@@ -245,10 +245,27 @@ def test_unreachable_node_has_max_distance():
     assert _distance_to_sampler("99", forward, {"9"}) == 99
 
 
-def test_last_lora_in_chain_is_picked():
-    """LoRA 체인에서 샘플러에 가장 가까운(=실제 쓰는) LoRA 를 고른다."""
+def test_every_lora_in_the_chain_gets_a_row():
+    """LoRA 는 이어 붙일 수 있다. 1번이 UNET 에 먼저 붙은 것.
+
+    회귀: 예전에는 '실제로 쓰는 것 하나' 만 골랐다. (샘플러에 가장 가까운
+    쪽을 고르는 규칙) 그래서 첫 번째 LoRA 를 고를 방법이 없었다.
+    """
     specs = infer_parameters(_sampler_wf({}, ["5", "6", "7"]))
-    assert specs["lora"].node == "7"
+    assert specs["lora"].node == "5", "먼저 붙은 것이 1번"
+    assert specs["lora2"].node == "6"
+    assert specs["lora3"].node == "7"
+
+
+def test_lora_out_of_the_chain_goes_last():
+    """체인에 끼어 있지 않은 LoRA 는 맨 뒤로 밀어낸다."""
+    stray = {"99": {"class_type": "LoraLoader",
+                    "inputs": {"lora_name": "99.safetensors",
+                               "model": ["1", 0]}}}
+    specs = infer_parameters(_sampler_wf(stray, ["5", "6", "7"]))
+    assert specs["lora"].node == "5", "실제로 쓰이는 것부터 앞에 온다"
+    assert specs["lora3"].node == "7"
+    assert specs["lora4"].node == "99", "쓰이지 않는 LoRA 는 끝에 놓인다"
 
 
 def test_orphan_loader_loses_to_used_one():

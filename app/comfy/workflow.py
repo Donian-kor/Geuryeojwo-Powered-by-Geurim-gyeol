@@ -202,9 +202,17 @@ def collect_extra(
     by_input = {spec.input: key for key, spec in params.items()}
     extra: dict[str, Any] = {}
     for widget_key, text in (selections or {}).items():
-        if not text or text.startswith("("):
+        if text is None or text == "":
             continue
-        key = by_input.get(input_of(widget_key))
+        # 강도는 숫자다. (LoRA 강도 슬라이더) 문자열만 다루면 깨진다
+        if isinstance(text, str) and text.startswith("("):
+            continue          # "(사용 안 함)" 같은 안내문
+        # 위젯 키가 곧 파라미터 키면 그걸 쓴다.
+        # 입력 이름으로 찾으면 겹칠 때 밀린다. (LoRA 두 개의 lora_name)
+        if widget_key in params:
+            key = widget_key
+        else:
+            key = by_input.get(input_of(widget_key))
         if key:
             extra[key] = text
     if lora_key and lora_strength is not None:
@@ -375,6 +383,10 @@ _MODEL_FOLDERS = {
     "config_name": "configs",         # CheckpointLoader
 }
 _MODEL_INPUTS = tuple(_MODEL_FOLDERS)
+# LoRA 는 여러 개가 이어질 수 있어 하나씩 다룬다. (5-1)
+_LORA_INPUTS = ("lora_name", "existing_lora")
+# LoRA 노드가 받는 강도 입력. 노드마다 이름이 다르다.
+_LORA_STRENGTH_INPUTS = ("strength_model", "strength_clip", "strength")
 # 폴더를 '입력 이름' 만으로 정할 수 없는 경우. 노드 종류로 구분한다.
 #
 # model_name 하나를 서로 다른 노드가 서로 다른 폴더로 쓴다.
@@ -513,14 +525,26 @@ def infer_parameters(prompt: dict) -> dict[str, ParameterSpec]:
             # (인핸서에도 seed 가 있어 구분해야 한다)
             if input_name in _SAMPLER_INPUTS and not is_sampler:
                 continue
+            # LoRA 의 강도는 5-1 에서 그 LoRA 와 짝을 이뤄 만든다.
+            # 여기서 따로 만들면 같은 입력에 두 항목이 생겨 값이 갈린다.
+            if input_name in _LORA_STRENGTH_INPUTS and _is_lora_node(node):
+                continue
 
             specs[input_name] = ParameterSpec(
                 input_name, node_id, input_name, None, _KIND_MAP[input_name]
             )
 
+    # 5-1) LoRA 는 이어 붙일 수 있다. (UNET -> LoRA -> LoRA -> 샘플러)
+    #      회귀: 여기서 '실제로 쓰이는 것 하나' 만 골랐기 때문에
+    #      2개 이상인 워크플로는 첫 번째 LoRA 를 고를 방법이 없었다.
+    specs.update(_lora_specs(prompt, sampler_nodes))
+
     # 5) 모델 선택도 GUI 로 노출
     #    같은 종류 로더가 여럿이면 실제로 쓰이는 것을 고른다. (B18)
     for input_name in _MODEL_INPUTS:
+        # LoRA 는 여러 개가 이어질 수 있어 5-1 에서 따로 다룬다
+        if input_name in _LORA_INPUTS:
+            continue
         values = {
             node_id: (node.get("inputs") or {}).get(input_name)
             for node_id, node in prompt.items()
@@ -584,6 +608,74 @@ def infer_parameters(prompt: dict) -> dict[str, ParameterSpec]:
             default=inputs.get("type"),
             node_class=node.get("class_type", ""),
         )
+    return specs
+
+
+def _is_lora_node(node: dict) -> bool:
+    """LoRA 를 붙이는 노드인가. (파일 선택 입력이 있는지로 판단한다)
+
+    노드 종류 이름을 나열하면 새 커스텀 노드를 놓친다. 실제로 LoRA
+    파일을 받는 노드라면 종류와 상관없이 LoRA 로더로 취급하는 편이
+    안전하다.
+    """
+    inputs = node.get("inputs") or {}
+    return any(name in inputs for name in _LORA_INPUTS)
+
+
+def _lora_specs(prompt: dict, sampler_nodes: set[str]) -> dict:
+    """이어진 LoRA 노드마다 파일·강도 항목을 하나씩 만든다.
+
+    순서는 '먼저 적용된 것' 이다. (UNET 에 먼저 붙인 것이 1번)
+    LoRA 는 나중에 적용된 것이 위에 얹히므로, 어느 것이 위인지
+    알 수 있어야 사용자가 고를 수 있다.
+
+    Returns:
+        dict[str, ParameterSpec]: lora / lora2 / lora3 … 와
+        lora_strength / lora_strength2 / … 짝.
+    """
+    found: list[tuple[str, str, str]] = []   # (노드, 입력 이름, 기본값)
+    for node_id, node in prompt.items():
+        inputs = node.get("inputs") or {}
+        for input_name in _LORA_INPUTS:
+            value = inputs.get(input_name)
+            if not isinstance(value, str) or not value.strip():
+                continue          # 링크로 물렸거나 비어 있다
+            found.append((node_id, input_name, value))
+
+    specs: dict[str, ParameterSpec] = {}
+    if not found:
+        return specs
+
+    # 샘플러에서 먼 쪽이 먼저 적용된다. (끝에 붙은 LoRA 가 거리 1)
+    forward = _downstream_index(prompt)
+
+    def _order(item: tuple[str, str, str]) -> tuple[bool, int]:
+        distance = _distance_to_sampler(item[0], forward, sampler_nodes)
+        # 샘플러에 닿지 않으면 _UNREACHABLE 이 나온다. 그 값을
+        # '아주 먼 곳' 으로 그대로 쓰면 체인보다 앞에 놓인다.
+        # (그래서 못 쓰는 LoRA 가 1번이 된다) 분리해서 뒤로 보낸다.
+        return (distance >= _UNREACHABLE, -distance)
+
+    found.sort(key=_order)
+
+    for index, (node_id, input_name, value) in enumerate(found, start=1):
+        key, label = _MODEL_LABELS[input_name]
+        # 첫 번째는 예전 키 이름(lora)을 그대로 쓴다. 저장된 워크플로와
+        # 화면의 선택이 끊기지 않도록 하기 위해서다.
+        key = key if index == 1 else f"{key}{index}"
+        label = label if index == 1 else f"{label} {index}"
+        specs[key] = ParameterSpec(
+            key, node_id, input_name, label,
+            f"model:{_MODEL_FOLDERS[input_name]}",
+        )
+        node = prompt.get(node_id) or {}
+        for strength_input in _LORA_STRENGTH_INPUTS:
+            if strength_input not in (node.get("inputs") or {}):
+                continue
+            strength_key = "lora_strength" if index == 1 else f"lora_strength{index}"
+            specs[strength_key] = ParameterSpec(
+                strength_key, node_id, strength_input, None, "float",
+            )
     return specs
 
 
@@ -690,6 +782,11 @@ def _downstream_index(prompt: dict) -> dict[str, list[str]]:
     return result
 
 
+# _distance_to_sampler 가 '닿지 않음' 을 알릴 때 돌려주는 값.
+# '아주 먼 곳' 과 구분되지 않으므로 거리로 정렬할 때는 따로 떼어 내야 한다.
+_UNREACHABLE = 99
+
+
 def _distance_to_sampler(node_id: str, forward: dict[str, list[str]],
                          sampler_nodes: set[str], limit: int = 8) -> int:
     """후보에서 샘플러까지 내려가는 최단 경로 길이. 닿지 않으면 99.
@@ -701,6 +798,9 @@ def _distance_to_sampler(node_id: str, forward: dict[str, list[str]],
 
     예: LoRA 체인 1 -> 5 -> 6 -> 7 -> KSampler(9) 에서 7 의 거리는 1,
     5 는 3 이다. 끝에 붙은 LoRA 가 실제로 쓰이는 것이다.
+
+    닿지 않으면 _UNREACHABLE 을 돌려준다. '아주 먼 곳' 과 구분되지
+    않으므로, 이 값을 거리로 sortable 할 때는 따로 떼어 내야 한다.
     """
     seen = {node_id}
     stack = [(node_id, 0)]
@@ -715,7 +815,7 @@ def _distance_to_sampler(node_id: str, forward: dict[str, list[str]],
                 continue
             seen.add(nxt)
             stack.append((nxt, depth + 1))
-    return 99
+    return _UNREACHABLE
 
 
 def _pick_prompt_candidate(

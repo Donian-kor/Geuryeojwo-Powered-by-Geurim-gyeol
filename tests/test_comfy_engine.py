@@ -965,11 +965,15 @@ def test_enhancer_model_prefers_filled_input_in_priority_order():
 
 
 def test_lora_strength_is_injectable_as_float(enhancer_engine):
-    """LoRA 강도(float)가 워크플로에 그대로 주입된다."""
+    """LoRA 강도(float)가 워크플로에 그대로 주입된다.
+
+    파라미터 키는 strength_model 이 아니라 lora_strength 다. (LoRA 가
+    여러 개일 수 있어서 번호를 붙일 수 있어야 한다)
+    """
     engine = enhancer_engine
     request = engine.build_request(
         prompt="p", width=640, height=480, steps=8, cfg=4.0, seed=1,
-        extra={"strength_model": 0.65},
+        extra={"lora_strength": 0.65},
     )
     _, payload = engine._payload(request)
     value = payload["16"]["inputs"]["strength_model"]

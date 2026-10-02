@@ -713,3 +713,107 @@ def test_chosen_clip_type_and_files_reach_the_request(qapp):
     finally:
         window.close()
 
+
+
+# --- 이어 붙은 LoRA ---------------------------------------------------
+
+def _lora_chain(count: int) -> dict:
+    """UNET -> LoRA -> LoRA … 로 이어진 워크플로."""
+    prompt = {
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "u.safetensors"}},
+        "5": {"class_type": "EmptyLatentImage",
+              "inputs": {"width": 512, "height": 512, "batch_size": 1}},
+        "8": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": "고양이", "clip": ["6", 0]}},
+    }
+    previous = "1"
+    for i in range(count):
+        node_id = str(2 + i)
+        prompt[node_id] = {
+            "class_type": "LoraLoaderModelOnly",
+            "inputs": {"lora_name": f"lora{i}.safetensors",
+                       "strength_model": 0.8, "model": [previous, 0]},
+        }
+        previous = node_id
+    prompt["9"] = {
+        "class_type": "KSampler",
+        "inputs": {"seed": 1, "steps": 20, "cfg": 4.0, "sampler_name": "euler",
+                   "scheduler": "normal", "denoise": 1, "model": [previous, 0],
+                   "positive": ["8", 0], "latent_image": ["5", 0]},
+    }
+    return prompt
+
+
+def _show_loras(qapp, window, count: int) -> None:
+    from app.comfy.workflow import Workflow, infer_parameters
+
+    prompt = _lora_chain(count)
+    specs = infer_parameters(prompt)
+    workflow = Workflow(
+        path=Path("메모리.json"), name="메모리", description="",
+        output_node="", prompt=prompt, parameters=specs,
+    )
+    window.engine.active_workflow = workflow
+    window._setup_models(specs, workflow.defaults())
+    window._setup_lora_strength(specs, workflow.defaults())
+    _show_model_tab(qapp, window)
+
+
+def test_multi_lora_gets_a_row_and_a_strength_each(qapp):
+    """회귀: LoRA 가 이어져 있는데 칸과 강도 줄이 하나뿐이었다."""
+    window = _plain_window(qapp)
+    try:
+        window._comfy_models = {
+            **SD_OPTIONS, "loras": ["lora0.safetensors", "lora1.safetensors"],
+        }
+        _show_loras(qapp, window, 2)
+        keys = list(window.model_combos)
+        assert "lora" in keys and "lora2" in keys, f"LoRA 칸이 둘이어야 한다: {keys}"
+        # 순서는 lora -> lora2 이어야 한다
+        assert keys.index("lora") < keys.index("lora2")
+        assert len(window._lora_sliders) == 2, "강도 줄도 LoRA 만큼 있어야 한다"
+        # lora_box 는 Generation 탭에 있다. 탭이 꺼져 있으니 isVisible 로
+        # 판단하면 안 되고, 명시적으로 숨겼는지만 본다.
+        assert not window.lora_box.isHidden(), "강도 줄을 감춰 놨다"
+    finally:
+        window.close()
+
+
+def test_single_lora_keeps_one_strength_row(qapp):
+    window = _plain_window(qapp)
+    try:
+        window._comfy_models = {**SD_OPTIONS, "loras": ["lora0.safetensors"]}
+        _show_loras(qapp, window, 1)
+        assert "lora" in window.model_combos
+        assert "lora2" not in window.model_combos
+        assert len(window._lora_sliders) == 1
+    finally:
+        window.close()
+
+
+def test_each_lora_file_and_strength_reaches_its_own_node(qapp):
+    """고른 값이 각 LoRA 노드로 따로 가야 한다."""
+    window = _plain_window(qapp)
+    try:
+        window._comfy_models = {
+            **SD_OPTIONS, "loras": ["lora0.safetensors", "lora1.safetensors"],
+        }
+        _show_loras(qapp, window, 2)
+        window.model_combos["lora"].setCurrentText("lora1.safetensors")
+        window.model_combos["lora2"].setCurrentText("lora0.safetensors")
+        window._lora_sliders[0][2].setValue(70)
+        window._lora_sliders[1][2].setValue(30)
+
+        extra = window._collect_extra()
+        assert extra["lora_strength"] == 0.7
+        assert extra["lora_strength2"] == 0.3
+
+        workflow = window.engine.active_workflow
+        payload = workflow.apply(extra)
+        assert payload["2"]["inputs"]["strength_model"] == 0.7
+        assert payload["3"]["inputs"]["strength_model"] == 0.3
+        assert payload["2"]["inputs"]["lora_name"] == "lora1.safetensors"
+        assert payload["3"]["inputs"]["lora_name"] == "lora0.safetensors"
+    finally:
+        window.close()
+

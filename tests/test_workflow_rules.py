@@ -225,3 +225,106 @@ def test_multi_clip_and_type_selections_reach_the_request():
         "clip2": "new2.safetensors",
         "clip_type": "sdxl",
     }
+
+
+# --- 이어 붙은 LoRA ----------------------------------------------------
+
+def _lora_chain(count: int) -> dict:
+    """UNET -> LoRA -> LoRA … -> 샘플러 로 이어진 워크플로."""
+    prompt = {
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "u.safetensors"}},
+        "5": {"class_type": "EmptyLatentImage",
+              "inputs": {"width": 512, "height": 512, "batch_size": 1}},
+        "8": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": "고양이", "clip": ["6", 0]}},
+    }
+    previous = "1"
+    for i in range(count):
+        node_id = str(2 + i)
+        prompt[node_id] = {
+            "class_type": "LoraLoaderModelOnly",
+            "inputs": {
+                "lora_name": f"lora{i}.safetensors",
+                "strength_model": 0.8 - i * 0.1,
+                "model": [previous, 0],
+            },
+        }
+        previous = node_id
+    prompt["9"] = {
+        "class_type": "KSampler",
+        "inputs": {"seed": 1, "steps": 20, "cfg": 7.0, "sampler_name": "euler",
+                   "scheduler": "normal", "denoise": 1, "model": [previous, 0],
+                   "positive": ["8", 0], "latent_image": ["5", 0]},
+    }
+    return prompt
+
+
+def test_every_lora_node_gets_its_own_row():
+    """회귀: LoRA 는 이어 붙일 수 있는데 '실제로 쓰이는 하나' 만 골랐다.
+
+    2개 이상인 워크플로는 첫 번째 LoRA 를 고를 방법이 없었다.
+    """
+    specs = infer_parameters(_lora_chain(3))
+    assert [k for k in specs if k.startswith("lora") and "strength" not in k] == [
+        "lora", "lora2", "lora3",
+    ]
+    assert specs["lora"].node == "2"
+    assert specs["lora2"].node == "3"
+    assert specs["lora3"].node == "4"
+    assert specs["lora2"].label == "LoRA 2", "몇 번째인지 보여야 한다"
+
+
+def test_lora_rows_follow_application_order():
+    """1번이 UNET 에 먼저 붙은 것이라야 한다.
+
+    LoRA 는 나중에 적용된 것이 위에 얹힌다. 순서가 뒤집히면
+    사용자가 위아래를 잘못 알고 고르게 된다.
+    """
+    specs = infer_parameters(_lora_chain(3))
+    assert specs["lora"].node == "2"      # UNET 에 바로 붙은 것
+    assert specs["lora3"].node == "4"     # 샘플러 바로 앞
+
+
+def test_each_lora_has_its_own_strength():
+    """LoRA 개수만큼 강도 항목이 생기고, 같은 노드를 가리켜야 한다."""
+    specs = infer_parameters(_lora_chain(2))
+    assert specs["lora_strength"].node == "2"
+    assert specs["lora_strength2"].node == "3"
+    assert specs["lora_strength2"].input == "strength_model"
+    # 같은 입력을 두 번 만들면 값이 갈린다
+    assert "strength_model" not in specs
+
+
+def test_single_lora_keeps_the_old_key_name():
+    """LoRA 가 하나일 때 키 이름이 달라지면 저장된 설정이 끊긴다."""
+    specs = infer_parameters(_lora_chain(1))
+    assert "lora" in specs and "lora2" not in specs
+    assert "lora_strength" in specs and "lora_strength2" not in specs
+
+
+def test_multi_lora_selections_reach_different_nodes():
+    """고른 LoRA 와 강도가 각자 다른 노드로 간다."""
+    specs = infer_parameters(_lora_chain(2))
+    extra = collect_extra(specs, {
+        "lora": "새1.safetensors", "lora2": "새2.safetensors",
+        "lora_strength": 0.7, "lora_strength2": 0.3,
+    })
+    assert extra == {
+        "lora": "새1.safetensors", "lora2": "새2.safetensors",
+        "lora_strength": 0.7, "lora_strength2": 0.3,
+    }
+
+
+def test_lora_manager_inputs_are_numbered_too():
+    """LoRA Manager 의 existing_lora 도 같은 방식으로 늘어난다."""
+    prompt = _lora_chain(2)
+    for node_id in ("2", "3"):
+        prompt[node_id]["inputs"].pop("lora_name")
+        prompt[node_id]["inputs"]["existing_lora"] = "a.safetensors"
+    specs = infer_parameters(prompt)
+    assert [k for k in specs if k.startswith("existing_lora")] == [
+        "existing_lora", "existing_lora2",
+    ]
+    assert specs["existing_lora2"].node == "3"
+    assert specs["existing_lora2"].kind == "model:loras"
+

@@ -48,6 +48,19 @@ _ENHANCER_CAPTION = "인핸서 모델 (로컬 GGUF)"
 # 인접서 GGUF 가 있는 ComfyUI 폴더. (T8 팩 코드의 MODEL_SUBDIRECTORY)
 _ENHANCER_FOLDER = "LLM"
 
+
+def _row_order(key: str) -> tuple[float, int]:
+    """Model 탭의 행 순서를 정한다.
+
+    LoRA 는 여러 개가 있어 lora, lora2, lora3 … 으로 늘어나므로
+    번호로 이어 붙인다. (1번이 UNET 에 먼저 붙은 것)
+    """
+    if key == "lora":
+        return (_MODEL_ROW_ORDER["lora"], 0)
+    if key.startswith("lora") and key[4:].isdigit():
+        return (_MODEL_ROW_ORDER["lora"], int(key[4:]))
+    return (_MODEL_ROW_ORDER.get(key, 99), 0)
+
 # 단계별 색. 판정은 app/engine/health.py 가 하고, 색은 여기서 정한다.
 # (engine 은 PySide6 를 모르므로 색을 알 수 없다)
 _LEVEL_QSS = {
@@ -599,7 +612,7 @@ class MainWindow(QWidget):
         wanted = [key for key, spec in params.items()
                   if str(spec.kind).startswith("model:") or spec.kind == "choice"]
         # 순서가 흔들리면 화면이 제자리에서 점프하므로 고정한다
-        wanted.sort(key=lambda k: _MODEL_ROW_ORDER.get(k, 99))
+        wanted.sort(key=_row_order)
         # 워크플로에 인접어 노드가 없어도 칸은 남긴다.
         # 그 경우엔 생성할 때 자동으로 끼워 넣으므로 고를 수 있게 해야 한다.
         if self._enhancer_row_wanted() and _ENHANCER_KEY not in wanted:
@@ -754,20 +767,12 @@ class MainWindow(QWidget):
         pv.addLayout(sampler_row)
 
         # LoRA 강도 — 별도 프레임이 아니라 Generation 프레임 안에 둔다.
-        # 워크플로에 strength_model 입력이 없으면 이 줄만 숨긴다
-        # (_setup_lora_strength 가 self.lora_box 를 토글한다).
-        self.lora_strength=QSlider(Qt.Horizontal); self.lora_strength.setRange(0,150)
-        self.lora_strength.setValue(100); self.lora_strength.setSingleStep(5)
-        self.lora_strength_label=QLabel("LoRA 강도 1.00")
-        self.lora_strength_label.setStyleSheet("color:#a0a0a0; font-size:11px;")
-        self.lora_strength.valueChanged.connect(
-            lambda v: self.lora_strength_label.setText(f"LoRA 강도 {v / 100:.2f}")
-        )
+        # LoRA 가 여러 개면 줄도 여러 개가 된다. (_setup_lora_strength 가 만든다)
+        # 워크플로에 strength_model 입력이 없으면 이 묶음 전체를 숨긴다.
         self.lora_box=QWidget()
-        lora_row=QHBoxLayout(self.lora_box); lora_row.setSpacing(4)
-        lora_row.setContentsMargins(0,0,0,0)
-        lora_row.addWidget(self.lora_strength_label)
-        lora_row.addWidget(self.lora_strength, 1)
+        self._lora_rows=QVBoxLayout(self.lora_box)
+        self._lora_rows.setSpacing(2); self._lora_rows.setContentsMargins(0,0,0,0)
+        self._lora_sliders: list[tuple[str, QLabel, QSlider]] = []
         pv.addWidget(self.lora_box)
 
         left.addWidget(params)
@@ -1361,21 +1366,56 @@ class MainWindow(QWidget):
         self._model_warning.setVisible(True)
 
     def _setup_lora_strength(self, params: dict, defaults: dict) -> None:
-        """LoRA 강도 슬라이더를 워크플로에 맞춘다.
+        """LoRA 강도 줄을 워크플로에 맞춘다.
 
-        워크플로마다 키가 "lora_strength" 또는 "strength_model" 처럼 다를 수
-        있으므로 실제 ComfyUI 입력 이름(spec.input)으로 판단한다.
+        LoRA 가 여러 개면 그만큼 줄을 만든다. (LoRA 강도 / LoRA 2 강도 …)
+        회귀: 줄이 하나뿐이라 두 번째 LoRA 의 강도를 바꿀 방법이 없었다.
+
+        실제 ComfyUI 입력 이름이 strength_model·strength_clip 등
+        여러 가지라 파라미터 키(lora_strength, lora_strength2)로 맞춘다.
+        (_setup_models 가 그 키로 값을 만든다)
         """
-        by_input = {spec.input: key for key, spec in params.items()}
-        key = by_input.get("strength_model")
-        self._lora_strength_key = key
-        enabled = key is not None
-        self.lora_box.setVisible(enabled)
-        if not enabled:
-            return
-        value = defaults.get(key)
-        if isinstance(value, (int, float)):
-            self.lora_strength.setValue(int(round(float(value) * 100)))
+        while self._lora_rows.count():
+            item = self._lora_rows.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+        self._lora_sliders = []
+
+        keys = [
+            k for k in params
+            if k == "lora_strength"
+            or (k.startswith("lora_strength") and k[len("lora_strength"):].isdigit())
+        ]
+        # lora_strength 는 번호가 없다. 그래도 다른 것과 같은 자리에서 정렬한다.
+        keys.sort(key=lambda k: int(k[len("lora_strength"):] or 0))
+
+        for key in keys:
+            number = int(key[len("lora_strength"):] or 0)
+            caption = "LoRA 강도" if number == 0 else f"LoRA {number} 강도"
+            value = defaults.get(key)
+            if not isinstance(value, (int, float)):
+                value = 1.0
+            label = QLabel(f"{caption} {float(value):.2f}")
+            label.setStyleSheet("color:#a0a0a0; font-size:11px;")
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(0, 150)
+            slider.setSingleStep(5)
+            slider.setValue(int(round(float(value) * 100)))
+            slider.valueChanged.connect(
+                lambda v, lb=label, cap=caption: lb.setText(f"{cap} {v / 100:.2f}")
+            )
+            row = QHBoxLayout(); row.setSpacing(4)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.addWidget(label)
+            row.addWidget(slider, 1)
+            self._lora_rows.addLayout(row)
+            self._lora_sliders.append((key, label, slider))
+
+        self.lora_box.setVisible(bool(self._lora_sliders))
+        # 예전 이름은 첫 번째 줄을 가리킨다. (다른 곳에서 참조한다)
+        self.lora_strength = self._lora_sliders[0][2] if self._lora_sliders else None
+        self._lora_strength_key = keys[0] if keys else None
 
     def _setup_sampler(self, params: dict, defaults: dict,
                        preserve_selection: bool = False) -> None:
@@ -1501,13 +1541,11 @@ class MainWindow(QWidget):
             selections["sampler"] = self.sampler.currentText()
         if self.scheduler.isEnabled():
             selections["scheduler"] = self.scheduler.currentText()
+        # 강도는 LoRA 개수만큼 있다. (0.00~1.50)
+        for key, _label, slider in self._lora_sliders:
+            selections[key] = round(slider.value() / 100, 2)
 
-        lora_key = getattr(self, "_lora_strength_key", None)
-        lora_strength = (self.lora_strength.value() / 100) if lora_key else None
-        return collect_extra(
-            self._active_params(), selections,
-            lora_key=lora_key, lora_strength=lora_strength,
-        )
+        return collect_extra(self._active_params(), selections)
 
     def _on_progress(self, percent, message):
         """진행률 콜백 (Worker 스레드에서 호출)."""
