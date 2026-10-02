@@ -314,11 +314,13 @@ app/
     workflow.py    354줄    Workflow · ParameterSpec · infer_parameters · collect_extra
   engine/
     comfy_engine.py 571줄  GeurimGyeolEngine · GenerationRequest/Result
+    health.py        88줄  UsageLevel · Thresholds · ram/vram/gpu/cpu_level
     output/manager.py 172줄  OutputManager · OutputMetadata · next_index
     session/manager.py 258줄 SessionManager · SessionMetadata · _slugify
   gui/
-    main_window.py   806줄  MainWindow · Worker · ComfyInfoWorker · ModelInfoPanel
+    main_window.py  1075줄  MainWindow · ModelInfoPanel · _paint_usage
     session_browser.py 427줄 HistoryBrowser
+    gpu_usage.py    163줄  GpuUsageReader (nvidia-smi 상주)
     theme/manager.py 193줄  ThemeManager
 
 workflows/     ComfyUI API 형식 워크플로
@@ -369,15 +371,26 @@ ComfyUI 처이다. 프라인드라브리를 비한 외부 의존성은 위 목�
 | 파일 | 개수 | 다루는 것 |
 |---|---|---|
 | `test_comfy_engine.py` | 47 | 워크플로 파싱, 값 주입, 메타데이터, 생성 |
+| `test_gpu_usage.py` | 27 | nvidia-smi 파싱, 사용률·VRAM 동시 조회, 부재 대응 |
+| `test_health.py` | 19 | 자원별 경고 단계와 표기 (GUI 없음) |
 | `test_output_session.py` | 17 | 저장 · 인덱스 충돌 · 폴더명 · 버전 |
+| `test_status_bar.py` | 15 | 갱신 주기 · CPU 블로킹 · 단계 색 · ModelInfo 일치 |
+| `test_history_browser.py` | 14 | 기록 1줄 목록, 썸네일, 클릭 1번 미리보기 |
+| `test_workflow_rules.py` | 11 | 모델 설치 판정 · 값 조립 (GUI 없음) |
 | `test_model_selection.py` | 6 | 미설치 모델 표시와 생성 차단 |
-| `test_history_browser.py` | 7 | 기록 1줄 목록, 썸네일, 클릭 1번 미리보기 |
 | `test_websocket_flow.py` | 4 | 실제 소켓으로 WS 순서 · prompt_id 필터 |
 | `test_non_blocking_refresh.py` | 4 | 새로고침이 GUI 스레드를 막지 않음 |
+| **합계** | **164** | |
 
-`conftest.py` 가 `QT_QPA_PLATFORM=offscreen` 을 기본 설정해
-GUI 테스트를 화면 없이 돌린다. 서버 접속은 모든 테스트에서 차단한다 —
-서버 상태에 따라 결과가 달라지지 않게 하기 위해서다.
+`conftest.py` 는 `QT_QPA_PLATFORM=offscreen` 만 기본 설정해
+GUI 테스트를 화면 없이 돌린다.
+
+**네트워크를 막는 장치는 없다.** 서버에 닿지 않는 것은 각 테스트가
+`monkeypatch` 로 `get_system_info` · `model_options` · `generate` 등을
+직접 대체해서이다. 실측 — 스위트 164개 실행 중 ComfyUI PID 불변,
+8188 포트로의 TCP 연결 0건. 다만 테스트를 새로 추가하면서 이 관례를
+빼먹으면 사용자의 서버를 건드릴 수 있다. 실제 생성 검증이 필요하면
+pytest 가 아니라 `tools/smoke_generate.py` 를 쓴다.
 
 ## 12. 프로젝트 성격
 
