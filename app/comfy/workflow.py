@@ -479,6 +479,7 @@ def infer_parameters(prompt: dict) -> dict[str, ParameterSpec]:
     #      positive 프롬프트가 인핸서 체인처럼 링크로 들어오면 후보가 남아 있지
     #      않은데, 그럴 때 네거티브 노드가 positive 로 잘못 잡혔다.
     #      (ERNIE 워크플로: 74 는 positive 로만, 75 는 negative 로만 연결됨)
+    all_candidates = list(prompt_candidates)
     only_negative = (
         _sampler_sources(prompt, sampler_nodes, "negative")
         - _sampler_sources(prompt, sampler_nodes, "positive")
@@ -494,6 +495,21 @@ def infer_parameters(prompt: dict) -> dict[str, ParameterSpec]:
     if prompt_candidates:
         specs["positive"] = _pick_prompt_candidate(
             prompt, prompt_candidates, sampler_nodes
+        )
+
+    # 3-1) 2-1 에서 뺀 네거티브 노드를 negative 칸으로 되돌려 준다.
+    #      회귀: 여기서 그냥 버렸다. 그래서 문자열 프롬프트가 두 개 있는
+    #      워크플로는 네거티브를 고칠 방법이 없었다.
+    #      (Z-Anime: 20 이 positive, 100 이 negative 인데 100 이 사라졌다)
+    negative_candidates = [
+        c for c in all_candidates if c[0] in only_negative
+    ]
+    if negative_candidates:
+        picked = _pick_prompt_candidate(
+            prompt, negative_candidates, sampler_nodes
+        )
+        specs["negative"] = ParameterSpec(
+            "negative", picked.node, picked.input, "네거티브 프롬프트", "text"
         )
 
     # 4) 나머지 파라미터

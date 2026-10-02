@@ -96,7 +96,8 @@ def test_no_guessed_prompt_when_positive_is_computed():
     """없는데 지어내지 않는다. defaults() 에 positive 가 없어야 한다."""
     defaults = _load(_ernie_workflow()).defaults()
     assert "positive" not in defaults
-    assert "Avoid blurry, low-quality" not in defaults.values()
+    # 네거티브 문장은 negative 칸에만 있어야 한다. positive 로 새지 않는다.
+    assert "Avoid blurry, low-quality" not in defaults.get("positive", "")
 
 
 def test_positive_picked_over_earlier_negative_node():
@@ -357,3 +358,46 @@ def test_ambiguous_input_name_is_never_guessed():
 def _load(prompt: dict) -> Workflow:
     return Workflow(path=None, name="t", description="", output_node="",
                     prompt=prompt, parameters=infer_parameters(prompt))
+
+
+def test_negative_only_node_is_exposed_as_negative():
+    """회귀: negative 에만 연결된 노드를 버렸다.
+
+    positive 로 잘못 잡히지 않도록 후보에서 뺐는데, 그 뒤를 다시
+    negative 칸으로 되돌리지 않았다. 그래서 문자열 프롬프트가 두 개
+    있는 워크플로는 네거티브를 고칠 방법이 없었다.
+    (Z-Anime: 20 이 positive, 100 이 negative 인데 100 이 사라졌다)
+    """
+    specs = infer_parameters(_z_anime_workflow())
+    assert specs["positive"].node == "20"
+    assert specs["negative"].node == "100", "네거티브 칸이 없다"
+    assert specs["negative"].input == "text"
+    assert specs["negative"].label == "네거티브 프롬프트"
+
+
+def test_negative_is_not_invented_without_a_negative_input():
+    """negative 로 연결된 곳이 없으면 칸도 만들지 않는다."""
+    prompt = {
+        "2": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": "고양이", "clip": ["1", 0]}},
+        "5": {"class_type": "EmptyLatentImage",
+              "inputs": {"width": 512, "height": 512, "batch_size": 1}},
+        "6": {"class_type": "KSampler",
+              "inputs": {"steps": 10, "cfg": 7.0, "sampler_name": "euler",
+                         "scheduler": "normal", "denoise": 1, "model": ["1", 0],
+                         "positive": ["2", 0], "latent_image": ["5", 0]}},
+    }
+    specs = infer_parameters(prompt)
+    assert specs["positive"].node == "2"
+    assert "negative" not in specs, "네거티브가 없는데 지어냈다"
+
+
+def test_negative_value_lands_on_its_own_node():
+    specs = infer_parameters(_z_anime_workflow())
+    workflow = _load(_z_anime_workflow())
+    negative = specs["negative"]
+    payload = workflow.apply({"negative": "새 네거티브", "positive": "새 프롬프트"})
+    assert payload[negative.node]["inputs"][negative.input] == "새 네거티브"
+    assert payload[specs["positive"].node]["inputs"]["text"] == "새 프롬프트"
+    # 원본은 바뀌지 않는다
+    assert workflow.prompt[negative.node]["inputs"][negative.input] == "Avoid blurry"
