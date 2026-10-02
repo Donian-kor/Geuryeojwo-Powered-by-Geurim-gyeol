@@ -38,7 +38,13 @@ _MODEL_ROW_ORDER = {
     "text_encoder": 7, "vae": 8,
     "lora": 9, "existing_lora": 10, "config": 11,
     "upscale_model": 12, "sam_model": 13,
+    "local_model": 14,          # 인접서용 GGUF (이미지 모델과 종류가 다르다)
 }
+# 인핸서 GGUF 파라미터 키. 다른 종류의 모델이라 구분선을 그은.
+_ENHANCER_KEY = "local_model"
+_ENHANCER_CAPTION = "인핸서 모델 (로컬 GGUF)"
+# 인접서 GGUF 가 있는 ComfyUI 폴더. (T8 팩 코드의 MODEL_SUBDIRECTORY)
+_ENHANCER_FOLDER = "LLM"
 
 # 단계별 색. 판정은 app/engine/health.py 가 하고, 색은 여기서 정한다.
 # (engine 은 PySide6 를 모르므로 색을 알 수 없다)
@@ -358,6 +364,9 @@ class MainWindow(QWidget):
         self._comfy_models={}; self._comfy_samplers={}
         # (사용 가능 여부, 안내 문구) — 백그라운드 조회 결과가 채운다
         self._enhancer_status=None
+        # 인접어 GGUF 는 워크플로에 없는 경우에도 생성 시점에 쓰인다.
+        # 마지막으로 고른 값을 기억해 두어 워크플로를 바꿔도 유지한다.
+        self._enhancer_choice=""
         self.theme_manager=ThemeManager(QApplication.instance(), ROOT / "config" / "theme_config.json"); self.theme_manager.apply_theme()
         self.build_ui(); self.refresh_models()
 
@@ -479,11 +488,19 @@ class MainWindow(QWidget):
         모델 파일 목록은 선택한 워크플로에 종속되므로 같은 화면에 둔다.
         """
         tab=QWidget(); layout=QVBoxLayout(tab)
+        # 목록은 이름만 짧으므로 좁은 쪽에, 모델 칸은 파일 이름이 길어 넓은 쪽에 둔다.
+        # 위아래로 두면 목록의 빈 세로 공간이 모델 칸을 아래로 밀어낸다.
+        body=QHBoxLayout(); layout.addLayout(body, 1)
 
         wfbox=QGroupBox("등록된 워크플로"); wf_layout=QVBoxLayout(wfbox)
         self.workflow_list=QListWidget()
         # 목록에서 고르면 상단 드롭다운이 따라간다
         self.workflow_list.itemSelectionChanged.connect(self._on_workflow_list_selected)
+        # 이름이 길면 반쪽 폭에서 잘린다. 잘린 글자를 알려 주도록 툴팁을 건다.
+        self.workflow_list.setToolTip(
+            "이름이 잘리면 항목에 마우스를 올려 보세요.\n"
+            "맨 위 드롭다운에서도 같은 목록을 볼 수 있습니다."
+        )
         wf_layout.addWidget(self.workflow_list)
         # ComfyUI 에서 워크플로를 가져와 새로 등록한다
         self.import_btn=QPushButton("+ 가져오기")
@@ -493,11 +510,14 @@ class MainWindow(QWidget):
         )
         self.import_btn.clicked.connect(self._on_import_workflow)
         wf_layout.addWidget(self.import_btn)
-        layout.addWidget(wfbox, 1)
+        body.addWidget(wfbox, 1)
 
         # 모델 선택 — ComfyUI 의 폴더별 목록에서 고른다 (v0.2 §5.3)
         self.model_boxes=QGroupBox("Models"); ml=QGridLayout(self.model_boxes)
         ml.setHorizontalSpacing(4); ml.setVerticalSpacing(2)
+        # 라벨 열은 그대로, 남는 폭은 모두 콤보에 준다.
+        # 지정하지 않으면 두 열이 같은 폭을 나눠 라벨과 콤보 사이에 빈틈이 생긴다.
+        ml.setColumnStretch(0, 0); ml.setColumnStretch(1, 1)
         # (파라미터 키, 라벨) — 워크플로가 LoRA/확산모델을 쓸 때만 활성화된다
         self.model_combos: dict[str, QComboBox] = {}
         self._model_labels: dict[str, str] = {}
@@ -514,15 +534,38 @@ class MainWindow(QWidget):
         # 행은 워크플로마다 다르므로 나중에 만든다. (_rebuild_model_rows)
         # CLIP 은 1개일 수도 4개일 수도 있어 목록을 미리 정할 수 없다.
         self._model_grid=ml
-        layout.addWidget(self.model_boxes)
-        layout.addWidget(self._model_warning)
+        right=QVBoxLayout(); right.setSpacing(4)
+        right.addWidget(self.model_boxes)
+        right.addWidget(self._model_warning)
+        right.addStretch(1)
+        body.addLayout(right, 2)
 
         self.model_info=ModelInfoPanel(self.engine); layout.addWidget(self.model_info)
-        layout.addStretch()
         self.workflow.currentIndexChanged.connect(lambda _: self._on_workflow_changed())
         return tab
 
     # --- 모델 칸(행) ----------------------------------------------------
+
+    def _enhancer_row_wanted(self) -> bool:
+        """인핸서 GGUF 칸을 보여줘야 하는가.
+
+        워크플로에 인핸서 노드가 있을 때도, 없어서 생성 시점에 자동으로
+        끼워 넣을 때도 필요하다. 사용자가 켜 두는 기능을 고를 수 있어야
+        하므로 '쓸 수 있는가' 를 기준으로 판단한다. (노드 유무가 아니다)
+        """
+        wf = self.engine.active_workflow
+        if wf is None:
+            return False
+        if _find_enhancer_node(wf.prompt) is not None:
+            return True
+        return not injection_block_reason(wf)
+
+    def _enhancer_model(self) -> str:
+        """사용자가 고른 인핸서 GGUF. 없으면 빈 문자열."""
+        combo = self.model_combos.get(_ENHANCER_KEY)
+        if combo is None or not combo.isEnabled():
+            return ""
+        return combo.currentText().strip()
 
     def _rebuild_model_rows(self, params: dict) -> None:
         """워크플로가 실제로 쓰는 모델 칸만 남긴다.
@@ -536,6 +579,10 @@ class MainWindow(QWidget):
                   if str(spec.kind).startswith("model:")]
         # 순서가 흔들리면 화면이 제자리에서 점프하므로 고정한다
         wanted.sort(key=lambda k: _MODEL_ROW_ORDER.get(k, 99))
+        # 워크플로에 인접어 노드가 없어도 칸은 남긴다.
+        # 그 경우엔 생성할 때 자동으로 끼워 넣으므로 고를 수 있게 해야 한다.
+        if self._enhancer_row_wanted() and _ENHANCER_KEY not in wanted:
+            wanted.append(_ENHANCER_KEY)
         if set(wanted) == set(self.model_combos):
             return
 
@@ -548,8 +595,20 @@ class MainWindow(QWidget):
         self.model_combos.clear()
         self._model_labels.clear()
 
-        for row, key in enumerate(wanted):
-            caption = params[key].label or key
+        row = 0
+        for key in wanted:
+            if key == _ENHANCER_KEY and row:
+                # 인접서 GGUF 는 이미지 모델과 종류가 다르다. 따로 고르는
+                # 항목임이 보이도록 구분선을 넣는다.
+                line = QFrame()
+                line.setFrameShape(QFrame.HLine)
+                line.setStyleSheet("color:#d5d5d5;")
+                grid.addWidget(line, row, 0, 1, 2)
+                row += 1
+            caption = params[key].label if key in params else _ENHANCER_CAPTION
+            label = QLabel(caption or key)
+            # 라벨이 가로로 늘어나면 라벨과 콤보 사이에 빈틈이 생긴다.
+            label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
             combo = QComboBox()
             combo.setMinimumWidth(120)
             # 모델이 많으면 드롭다운이 화면을 다 먹는다.
@@ -560,8 +619,9 @@ class MainWindow(QWidget):
             )
             self.model_combos[key] = combo
             self._model_labels[key] = caption
-            grid.addWidget(QLabel(caption), row, 0)
+            grid.addWidget(label, row, 0)
             grid.addWidget(combo, row, 1)
+            row += 1
 
     # --- 워크플로 가져오기 ------------------------------------------------
 
@@ -1105,6 +1165,35 @@ class MainWindow(QWidget):
         self.enhancer_warning.setText(f"⚠ 프롬프트 인핸서: {message}")
         self.enhancer_warning.setVisible(True)
 
+    def _fill_enhancer_combo(self, combo: QComboBox) -> None:
+        """인접어 GGUF 칸을 채운다.
+
+        워크플로에 인접어 노드가 없으면 값을 넣을 노드 ID 가 없다.
+        그래서 마지막으로 고른 값을 기억해 두었다가 다른 워크플로로
+        옮겨 갈 때도 그대로 쓴다. (같은 컴퓨터의 같은 목록이기 때문)
+        """
+        items = list(self._comfy_models.get(_ENHANCER_FOLDER) or [])
+        current = self._enhancer_choice or (items[0] if items else "")
+        if not items:
+            combo.addItem("(설치된 GGUF 가 없습니다)")
+            combo.setEnabled(False)
+            combo.setToolTip(
+                f"ComfyUI 의 models/{_ENHANCER_FOLDER} 폴더에\n"
+                "GGUF 파일을 넣으면 여기에 나타납니다."
+            )
+            self._enhancer_choice = ""
+            return
+        combo.setEnabled(True)
+        combo.setToolTip("")
+        for item in items:
+            combo.addItem(item)
+        if current and str(current) not in items:
+            combo.insertItem(0, str(current))
+        index = combo.findText(str(current))
+        if index >= 0:
+            combo.setCurrentIndex(index)
+        self._enhancer_choice = combo.currentText()
+
     def _setup_models(self, params: dict, defaults: dict,
                       preserve_selection: bool = False) -> None:
         """모델 선택 드롭다운을 워크플로에 맞춘다.
@@ -1134,6 +1223,12 @@ class MainWindow(QWidget):
             combo.blockSignals(True)
             combo.clear()
             spec = params.get(key)
+            if key == _ENHANCER_KEY and spec is None:
+                # 워크플로에 인접어 노드가 없다. 생성 시 끼워 넣을 값이므로
+                # 워크플로 기본값 대신 설치된 GGUF 목록을 보여준다.
+                self._fill_enhancer_combo(combo)
+                combo.blockSignals(False)
+                continue
             if spec is None:
                 # 이 워크플로는 이 모델을 쓰지 않는다
                 combo.addItem("(사용 안 함)")
@@ -1352,6 +1447,7 @@ class MainWindow(QWidget):
                 seed=self.seed.value(),
                 extra=self._collect_extra(),
                 enhance_prompt=self.enhance.isChecked(),
+            enhancer_model=self._enhancer_model(),
             )
         except RuntimeError as exc:
             self.generate.setEnabled(True)

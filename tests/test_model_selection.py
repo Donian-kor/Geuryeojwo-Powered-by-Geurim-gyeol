@@ -19,7 +19,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
 
 from app.comfy.client import ComfyClient, SystemInfo
 from app.engine.comfy_engine import GeurimGyeolEngine
@@ -358,6 +358,84 @@ def test_checkpoint_row_is_absent_for_qwen_workflow(make_window):
         w.close()
 
 
+# --- Model 탭 배치 -----------------------------------------------------
+
+def _show_model_tab(qapp, window):
+    """Model 탭을 선택하고 배치를 계산한다."""
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QTabWidget
+
+    window.findChild(QTabWidget).setCurrentIndex(1)
+    window.show()
+    qapp.processEvents()
+    return QPoint
+
+
+def test_model_tab_is_split_left_and_right(qapp):
+    """회귀: 목록(왼쪽)과 모델 칸(오른쪽)이 나란히 있어야 한다.
+
+    위아래로 두면 목록의 빈 세로 공간이 모델 칸을 아래로 밀어낸다.
+    """
+    window = _plain_window(qapp)
+    try:
+        QPoint = _show_model_tab(qapp, window)
+        list_x = window.workflow_list.mapTo(window, QPoint(0, 0)).x()
+        model_x = window.model_boxes.mapTo(window, QPoint(0, 0)).x()
+        assert model_x > list_x, "모델 칸이 목록의 오른쪽에 없다"
+    finally:
+        window.close()
+
+
+def test_model_info_stays_full_width_below(qapp):
+    """ModelInfo 는 아래에 전체 폭으로 그대로 둔다."""
+    window = _plain_window(qapp)
+    try:
+        QPoint = _show_model_tab(qapp, window)
+        box = window.model_boxes
+        info = window.model_info
+        box_x = box.mapTo(window, QPoint(0, 0))
+        info_x = info.mapTo(window, QPoint(0, 0))
+        assert info_x.x() + info.width() >= box_x.x() + box.width(), \
+            "ModelInfo 가 모델 칸보다 좁다"
+        assert info_x.y() > box_x.y(), "ModelInfo 가 위로 올라왔다"
+    finally:
+        window.close()
+
+
+def test_model_combos_are_aligned_and_label_column_is_narrow(qapp):
+    """회귀: 라벨이 왼쪽 끝, 콤보가 오른쪽 끝에 붙으면 화면이 깨진 것 같다.
+
+    예전에는 두 열이 같은 폭을 나눠 라벨과 콤보 사이에 수백 px 가 떨어졌다.
+    이제는 남는 폭이 모두 콤보에 간다. (라벨 열은 내용만큼만)
+    """
+    window = _plain_window(qapp)
+    try:
+        _show(window, _sd_prompt())
+        QPoint = _show_model_tab(qapp, window)
+        grid = window._model_grid
+        combos = []
+        labels = []
+        for row in range(grid.rowCount()):
+            label_item = grid.itemAtPosition(row, 0)
+            combo_item = grid.itemAtPosition(row, 1)
+            if not label_item or not combo_item:
+                continue
+            label = label_item.widget()
+            combo = combo_item.widget()
+            if not isinstance(label, QLabel):
+                continue          # 두 열을 가로지르는 구분선 등
+            combos.append(combo.mapTo(window, QPoint(0, 0)).x())
+            labels.append(label.mapTo(window, QPoint(0, 0)).x())
+        assert len(combos) >= 2, "확인할 행이 없다"
+        # 모든 콤보가 같은 자리에서 시작해야 세로로 정렬돼 보인다
+        assert len(set(combos)) == 1, f"콤보 시작 위치가 어긋난다: {combos}"
+        # 라벨 열이 화면을 다 먹지 않아야 한다
+        span = combos[0] - labels[0]
+        assert 0 < span < 260, f"라벨 열이 {span}px 로 넓다"
+    finally:
+        window.close()
+
+
 # --- CLIP 2~4개인 워크플로 (Flux / SD3 / Hunyuan) ------------------------
 
 def _clip_workflow(clip_class: str, count: int) -> dict:
@@ -385,8 +463,14 @@ def _clip_workflow(clip_class: str, count: int) -> dict:
 
 
 def _show(window, prompt):
-    from app.comfy.workflow import infer_parameters
+    from app.comfy.workflow import Workflow, infer_parameters
     specs = infer_parameters(prompt)
+    # 실제 프로그램은 워크플로를 먼저 선택한 뒤 칸을 세운다.
+    # 인접어 칸을 보여줄지 판단할 때 선택된 워크플로를 보기 때문이다.
+    window.engine.active_workflow = Workflow(
+        path=Path("메모리.json"), name="메모리", description="",
+        output_node="", prompt=prompt, parameters=specs,
+    )
     window._setup_models(specs, {})
     return window
 
@@ -438,9 +522,10 @@ def test_multi_clip_rows_are_ordered(qapp):
         assert list(window._model_labels.values()) == [
             "확산 모델", "텍스트 인코더 1", "텍스트 인코더 2",
             "텍스트 인코더 3", "텍스트 인코더 4", "VAE",
+            "인핸서 모델 (로컬 GGUF)",
         ]
         assert list(window.model_combos) == [
-            "unet", "clip1", "clip2", "clip3", "clip4", "vae",
+            "unet", "clip1", "clip2", "clip3", "clip4", "vae", "local_model",
         ]
     finally:
         window.close()
@@ -496,3 +581,60 @@ def _sd_prompt() -> dict:
         "6": {"class_type": "SaveImage", "inputs": {"images": ["5", 0]}},
     }
 
+
+
+
+def _no_injection_prompt() -> dict:
+    """프롬프트를 받는 노드가 아예 없는 워크플로.
+
+    텍스트 인코더가 없으니 인접어 노드를 끼워 넣을 자리가 없다.
+    인접어 기능 자체를 쓸 수 없으므로 GGUF 칸도 숨겨져야 한다.
+    """
+    return {
+        "1": {"class_type": "CheckpointLoaderSimple",
+              "inputs": {"ckpt_name": "sdA.safetensors"}},
+        "3": {"class_type": "EmptyLatentImage",
+              "inputs": {"width": 512, "height": 512, "batch_size": 1}},
+        "4": {"class_type": "KSampler",
+              "inputs": {"seed": 1, "steps": 20, "cfg": 7.0,
+                         "sampler_name": "euler", "scheduler": "normal",
+                         "denoise": 1, "model": ["1", 0],
+                         "positive": ["9", 0], "negative": ["9", 0],
+                         "latent_image": ["3", 0]}},
+        "5": {"class_type": "VAEDecode",
+              "inputs": {"samples": ["4", 0], "vae": ["1", 2]}},
+        "6": {"class_type": "SaveImage", "inputs": {"images": ["5", 0]}},
+    }
+
+
+def test_enhancer_row_shows_even_without_enhancer_node(qapp):
+    """회귀: 인접어 체크박스는 켤 수 있는데 고를 칸이 없던 문제.
+
+    인접어 노드가 없는 워크플로는 생성할 때 자동으로 끼워 넣는다.
+    그래도 사용자가 GGUF 를 고를 수 있어야 하므로 칸이 남아야 한다.
+    """
+    window = _plain_window(qapp)
+    try:
+        _show(window, _sd_prompt())
+        _show_model_tab(qapp, window)
+        assert "local_model" in window.model_combos, (
+            "인접어 칸이 없다: " + str(list(window.model_combos))
+        )
+        combo = window.model_combos["local_model"]
+        assert combo.count() >= 1, "GGUF 선택지가 하나도 없다"
+    finally:
+        window.close()
+
+
+def test_enhancer_row_hidden_when_injection_impossible(qapp):
+    """끼워 넣을 자리가 없으면 인접어 기능 자체가 못 쓰므로 칸도 숨긴다."""
+    window = _plain_window(qapp)
+    try:
+        _show(window, _no_injection_prompt())
+        _show_model_tab(qapp, window)
+        assert "local_model" not in window.model_combos, (
+            "끼울 수 없는 워크플로에 인접어 칸이 나왔다: "
+            + str(list(window.model_combos))
+        )
+    finally:
+        window.close()
