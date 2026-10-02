@@ -14,9 +14,145 @@ import pytest
 from PIL import Image
 
 from app.engine.comfy_engine import GeurimGyeolEngine, _is_enhancer
-from app.comfy.client import SystemInfo
+from app.comfy.client import ComfyClient, SystemInfo
 from app.comfy.config import ComfyUIConfig
 from app.comfy.workflow import infer_parameters
+
+
+# --- 목록 조회와 캐시 -------------------------------------------------
+# 회귀 근거: /object_info 전체 응답이 노드 1000종을 넘어 2.4MB 다.
+# 가져오기 창에서 파일을 몇 개 열 때마다 다시 받으면 낭비가 커서
+# 짧은 시간 동안은 재사용한다. 방금 노드를 설치했을 수 있어 TTL 은 짧다.
+
+
+class _StubClient:
+    """목록 조회만 흉내내는 ComfyClient 대체."""
+
+    def __init__(self, clip=None, nodes=None, fail=False):
+        self.clip = ["qwen_image", "flux2"] if clip is None else clip
+        self.nodes = {"KSampler": {}, "SaveImage": {}} if nodes is None else nodes
+        self.fail = fail
+        self.calls = {"clip": 0, "nodes": 0}
+
+    async def get_clip_types(self):
+        self.calls["clip"] += 1
+        if self.fail:
+            raise RuntimeError("서버 꺼짐")
+        return list(self.clip)
+
+    async def get_object_info(self, node_class=None):
+        self.calls["nodes"] += 1
+        if self.fail:
+            raise RuntimeError("서버 꺼짐")
+        return dict(self.nodes)
+
+
+def _engine(tmp_path, stub) -> GeurimGyeolEngine:
+    engine = GeurimGyeolEngine(tmp_path)
+    engine.client = stub
+    return engine
+
+
+class _FakeResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+@pytest.mark.parametrize("spec,expected", [
+    ([["qwen_image", "flux2"], {}], ["qwen_image", "flux2"]),   # 신버전
+    (["COMBO", {"options": ["lumina2"]}], ["lumina2"]),          # T8 팩 형태
+    (["STRING", {}], []),                                         # 자유 입력
+    (None, []),
+])
+def test_get_clip_types_handles_definition_shapes(spec, expected, monkeypatch):
+    """ComfyUI 의 입력 정의 형태가 두 가지다. 둘 다 읽어야 한다."""
+    payload = {"CLIPLoader": {"input": {"required": {"type": spec}}}}
+    client = ComfyClient(ComfyUIConfig())
+
+    async def fake_get(path, timeout=30):
+        return _FakeResponse(payload)
+
+    monkeypatch.setattr(client, "_get", fake_get)
+    assert asyncio.run(client.get_clip_types()) == expected
+
+
+def test_get_clip_types_reads_only_one_node(monkeypatch):
+    """전체(/object_info)가 아니라 CLIPLoader 하나만 조회해야 한다."""
+    seen = []
+    client = ComfyClient(ComfyUIConfig())
+
+    async def fake_get(path, timeout=30):
+        seen.append(path)
+        return _FakeResponse(
+            {"CLIPLoader": {"input": {"required": {"type": [["a"], {}]}}}}
+        )
+
+    monkeypatch.setattr(client, "_get", fake_get)
+    asyncio.run(client.get_clip_types())
+    assert seen == ["/object_info/CLIPLoader"]
+
+
+def test_clip_types_are_cached(tmp_path):
+    stub = _StubClient()
+    engine = _engine(tmp_path, stub)
+    first = engine.clip_types()
+    second = engine.clip_types()
+    assert first == second == ["qwen_image", "flux2"]
+    assert stub.calls["clip"] == 1, "캐시가 통하지 않았다"
+
+
+def test_clip_types_cache_expires(tmp_path):
+    stub = _StubClient()
+    engine = _engine(tmp_path, stub)
+    engine.clip_types()
+    engine._clip_types_at = 0.0        # 유효 시간 경과
+    engine.clip_types()
+    assert stub.calls["clip"] == 2
+
+
+def test_clip_types_returns_fresh_list(tmp_path):
+    """호출자가 바꿔도 캐시가 오염되지 않게 새 리스트를 준다."""
+    stub = _StubClient()
+    engine = _engine(tmp_path, stub)
+    result = engine.clip_types()
+    result.append("없는 타입")
+    assert "없는 타입" not in engine.clip_types()
+
+
+def test_clip_types_failure_returns_empty(tmp_path):
+    """조회 실패는 빈 목록. 모르는 걸 정상이라고 말하지 않는다."""
+    engine = _engine(tmp_path, _StubClient(fail=True))
+    assert engine.clip_types() == []
+
+
+def test_node_types_are_cached(tmp_path):
+    stub = _StubClient()
+    engine = _engine(tmp_path, stub)
+    assert engine.node_types() == {"KSampler", "SaveImage"}
+    engine.node_types()
+    assert stub.calls["nodes"] == 1, "2.4MB 를 매번 다시 받았다"
+
+
+def test_node_types_cache_expires(tmp_path):
+    stub = _StubClient()
+    engine = _engine(tmp_path, stub)
+    engine.node_types()
+    engine._node_types_at = 0.0
+    engine.node_types()
+    assert stub.calls["nodes"] == 2
+
+
+def test_node_types_failure_does_not_poison_cache(tmp_path):
+    """실패하면 빈 집합(판단 보류). 예전 성공값을 지우지 않는다."""
+    stub = _StubClient()
+    engine = _engine(tmp_path, stub)
+    assert engine.node_types() == {"KSampler", "SaveImage"}
+    stub.fail = True
+    engine._node_types_at = 0.0
+    assert engine.node_types() == set()
 
 
 def _png_bytes(size=(64, 64), color=(200, 30, 30)) -> bytes:

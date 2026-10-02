@@ -50,6 +50,11 @@ _ENHANCER_LOCAL_MODE_MARK = "gguf"
 # 어느 인코더에 붙여야 할지는 워크플로마다 달라 프로그램이 정할 수 없다.
 _PROMPT_TEXT_INPUTS = ("text", "prompt", "positive", "user_prompt")
 
+# ComfyUI 목록 조회 결과의 캐시 유효 시간(초).
+# 노드를 방금 설치했을 수 있으니 너무 길지 않게 둔다.
+# 한 번에 여러 파일을 확인하는 동안에는 재사용된다.
+_LIST_CACHE_TTL = 300.0
+
 
 def _is_enhancer(class_type: str) -> bool:
     """프롬프트 인핸서 노드인지 판단한다."""
@@ -221,6 +226,15 @@ class GeurimGyeolEngine:
         # 인핸서 노드 정의 캐시 (ComfyUI 에 물어본 결과).
         # 워크플로에 없는 노드를 직접 만들어 넣을 때만 필요하다.
         self._enhancer_defaults: tuple[str | None, dict, dict] | None = None
+
+        # /object_info 전체 응답에서 뽑은 노드 종류 집합 (가져오기 창이 쓴다).
+        # 응답이 2.4MB 라 파일을 몇 개 열 때마다 다시 받으면 낭비가 크다.
+        # 방금 커스텀 노드를 설치했을 수 있으니 시간을 둔다(TTL).
+        self._node_types_cache: set[str] | None = None
+        self._node_types_at: float = 0.0
+        # CLIPLoader 의 type 선택지도 같은 방식으로 캐한다.
+        self._clip_types_cache: list[str] | None = None
+        self._clip_types_at: float = 0.0
 
         # ComfyUI 통신용 이벤트 루프를 하나만 두고 재사용한다.
         # (GUI 스레드와 QThread 워커가 함께 쓸 수 있으므로 직렬화한다)
@@ -449,15 +463,47 @@ class GeurimGyeolEngine:
         """ComfyUI 가 아는 노드 타입 이름 집합.
 
         워크플로가 설치되지 않은 노드를 쓰는지 확인할 때 쓴다.
-        /object_info 응답이 크다(노드 1000종 이상) 그래서 전체 주기는
-        아니라 워크플로를 가져올 때 한 번만 읽는다.
+
+        /object_info 응답이 노드 1000종을 넘어 2.4MB 다. 가져오기 창에서
+        파일을 몇 개 열 때마다 다시 받으면 낭비가 크니 잠깐(TTL) 캐한다.
+        방금 커스텀 노드를 설치했을 수 있어 시간만 두고 지킨다.
+
+        Returns:
+            set[str]: 노드 타입 이름. 조회 실패면 빈 집합(판단 보류).
         """
+        if self._is_fresh(self._node_types_at) and self._node_types_cache is not None:
+            return self._node_types_cache
         try:
             info = self._run(self.client.get_object_info())
         except Exception as exc:
             self.logger.warning("노드 목록 조회 실패: %s", exc)
             return set()
-        return set(info) if isinstance(info, dict) else set()
+        self._node_types_cache = set(info) if isinstance(info, dict) else set()
+        self._node_types_at = time.monotonic()
+        return self._node_types_cache
+
+    def clip_types(self) -> list[str]:
+        """CLIPLoader 가 받는 type 선택지 (qwen_image, flux, lumina2 …).
+
+        텍스트 인코더가 여러 개인 모델은 type 이 달라져야 한다.
+        (Flux 는 flux, Z-Image 는 lumina2, Qwen 은 qwen_image)
+        워크플로에 없는 CLIP 타입을 넣으면 ComfyUI 가 거부한다.
+        """
+        if self._is_fresh(self._clip_types_at) and self._clip_types_cache is not None:
+            return list(self._clip_types_cache)
+        try:
+            options = self._run(self.client.get_clip_types())
+        except Exception as exc:
+            self.logger.warning("CLIP 타입 조회 실패: %s", exc)
+            return []
+        self._clip_types_cache = list(options)
+        self._clip_types_at = time.monotonic()
+        return list(self._clip_types_cache)
+
+    @staticmethod
+    def _is_fresh(stamp: float) -> bool:
+        """캐시가 아직 유효한가."""
+        return (time.monotonic() - stamp) < _LIST_CACHE_TTL
 
     # --- 취소 -------------------------------------------------------
 

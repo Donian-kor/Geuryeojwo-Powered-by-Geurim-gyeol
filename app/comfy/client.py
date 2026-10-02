@@ -301,6 +301,20 @@ class ComfyClient:
             result[key] = _extract_options(inputs.get(field))
         return result
 
+    async def get_clip_types(self) -> list[str]:
+        """CLIPLoader 의 type 입력 선택지 (qwen_image, flux, lumina2 …).
+
+        노드 하나만 조회한다. /object_info 전체는 노드 1000종이 넘어
+        2MB 라 0.6KB 로 줄일 수 있다.
+        (실측: 전체 87ms/2.4MB → 한 종류 0.6ms/1.2KB)
+        """
+        info = await self.get_object_info("CLIPLoader")
+        node = info.get("CLIPLoader") if isinstance(info, dict) else None
+        if not isinstance(node, dict):
+            return []
+        spec = ((node.get("input") or {}).get("required") or {}).get("type")
+        return _input_options(spec)
+
     # --- 실행 API (v0.2 §4.2, §4.3) -----------------------------
 
     async def queue_prompt(self, workflow: dict) -> str:
