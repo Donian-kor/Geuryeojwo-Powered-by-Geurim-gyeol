@@ -11,6 +11,9 @@ from PySide6.QtWidgets import (
 )
 from app.comfy.check import prompt_of
 from app.comfy.config import guess_models_dir
+from app.comfy.model_family import (
+    detect_file_family, detect_prompt_family, family_label, is_compatible,
+)
 from app.comfy.workflow import (
     collect_extra, installed_models, missing_models, save_profile,
 )
@@ -396,6 +399,8 @@ class MainWindow(QWidget):
         self._comfy_models={}; self._comfy_samplers={}
         # 노드 종류 -> 열거형 선택지 (CLIP 로더의 type 등)
         self._comfy_input_options={}
+        # 계열 감시 대상 (파라미터 키, ComfyUI 폴더)
+        self._family_guards: list[tuple[str, str]] = []
         # (사용 가능 여부, 안내 문구) — 백그라운드 조회 결과가 채운다
         self._enhancer_status=None
         # 인접어 GGUF 는 워크플로에 없는 경우에도 생성 시점에 쓰인다.
@@ -1254,6 +1259,44 @@ class MainWindow(QWidget):
             combo.setCurrentIndex(index)
         self._enhancer_choice = combo.currentText()
 
+    def _apply_family_guard(self, combo: QComboBox, folder: str) -> None:
+        """다른 계열의 모델은 고르지 못하게 한다.
+
+        한 워크플로는 한 계열의 모델에만 동작한다. (Qwen 워크플로에 SDXL
+        체크포인트를 넣으면 ComfyUI 가 실행 단계에서 실패한다)
+        목록에서 지우지 않고 이유를 알려준다 — 감춰 버리면 왜 안 되는지
+        알 수 없어서 사용자가 더 혼란스러워진다.
+
+        계열을 모르면 아무것도 막지 않는다. 추측해서 막으면 사용자가
+        쓸 수 있는 모델까지 못 쓰게 된다.
+        """
+        wf = self.engine.active_workflow
+        if wf is None or not folder:
+            return
+        models_dir = self._models_dir()
+        if not models_dir:
+            return
+        family = detect_prompt_family(wf.prompt, models_dir)
+        if not family:
+            return
+        item_model = combo.model()
+        for index in range(combo.count()):
+            name = combo.itemText(index)
+            if not name or name.startswith("("):
+                continue
+            model_family = detect_file_family(Path(models_dir) / folder / name)
+            if is_compatible(family, model_family):
+                continue
+            item = item_model.item(index)
+            if item is None:
+                continue
+            item.setEnabled(False)
+            item.setToolTip(
+                f"이 워크플로는 {family_label(family)} 계열입니다.\n"
+                f"{name} 은(는) {family_label(model_family)} 계열이라 "
+                "함께 쓸 수 없습니다."
+            )
+
     def _setup_models(self, params: dict, defaults: dict,
                       preserve_selection: bool = False) -> None:
         """모델 선택 드롭다운을 워크플로에 맞춘다.
@@ -1277,6 +1320,7 @@ class MainWindow(QWidget):
             {key: combo.currentText() for key, combo in self.model_combos.items()}
             if preserve_selection else {}
         )
+        self._family_guards: list[tuple[str, str]] = []
         # 칸을 먼저 만든다. 워크플로마다 쓰는 칸이 다르다. (B19)
         self._rebuild_model_rows(params)
         for key, combo in self.model_combos.items():
@@ -1306,6 +1350,9 @@ class MainWindow(QWidget):
                 folder = spec.kind.split(":", 1)[1] if ":" in spec.kind else ""
                 items = list(options.get(folder) or [])
                 current = defaults.get(key)
+                # 계열이 정해지는 폴더만 감시 대상이다.
+                if folder in ("checkpoints", "diffusion_models"):
+                    self._family_guards.append((key, folder))
             if not items:
                 # ComfyUI 응답이 없으면 워크플로 기본값만
                 items = [current] if current else []
@@ -1326,6 +1373,10 @@ class MainWindow(QWidget):
                     combo.setCurrentIndex(index)
             combo.blockSignals(False)
         self._paint_missing_models()
+        # 계열 표시는 마지막에 한다. _paint_missing_models 도 항목의
+        # 툴팁을 다시 쓰기 때문에 먼저 하면 이유가 사라진다.
+        for key, folder in self._family_guards:
+            self._apply_family_guard(self.model_combos[key], folder)
 
     def _active_params(self) -> dict:
         """활성 워크플로의 parameters 맵."""

@@ -887,3 +887,78 @@ def test_generate_tab_shows_only_the_essentials(qapp):
         assert window.prompt.maximumHeight() <= 260
     finally:
         window.close()
+# --- 계열이 다른 모델은 고르지 못하게 한다 ----------------------------
+
+def _unet_workflow(model_name: str) -> dict:
+    return {
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": model_name}},
+        "2": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": "고양이", "clip": ["3", 0]}},
+        "3": {"class_type": "CLIPLoader",
+              "inputs": {"clip_name": "t.safetensors", "type": "qwen_image"}},
+        "5": {"class_type": "EmptyLatentImage",
+              "inputs": {"width": 512, "height": 512, "batch_size": 1}},
+        "6": {"class_type": "KSampler",
+              "inputs": {"seed": 1, "steps": 30, "cfg": 4.0,
+                         "sampler_name": "euler", "scheduler": "simple",
+                         "denoise": 1, "model": ["1", 0],
+                         "positive": ["2", 0], "latent_image": ["5", 0]}},
+    }
+
+
+def _family_window(qapp, tmp_path):
+    """계열 판별이 가능한 창. 모델 파일을 직접 만들어 넣는다."""
+    from test_model_family import QWEN_KEYS, SDXL_KEYS, _safetensors
+
+    root = tmp_path / "models"
+    (root / "diffusion_models").mkdir(parents=True)
+    (root / "text_encoders").mkdir(parents=True)
+    (root / "loras").mkdir(parents=True)
+    (root / "checkpoints").mkdir(parents=True)
+    _safetensors(root / "diffusion_models" / "qwen.safetensors", QWEN_KEYS)
+    _safetensors(root / "diffusion_models" / "xl.safetensors", SDXL_KEYS)
+
+    window = _plain_window(qapp)
+    window.engine.config.models_dir = str(root)
+    window._comfy_models = {
+        "diffusion_models": ["qwen.safetensors", "xl.safetensors"],
+        "text_encoders": ["t.safetensors"],
+        "checkpoints": [], "vae": [], "loras": [],
+    }
+    return window
+
+
+def test_other_family_model_cannot_be_picked(qapp, tmp_path):
+    """Qwen 워크플로에서 SDXL 확산 모델을 고를 수 없어야 한다."""
+    window = _family_window(qapp, tmp_path)
+    try:
+        _show(window, _unet_workflow("qwen.safetensors"))
+        combo = window.model_combos["unet"]
+        ok = combo.model().item(combo.findText("qwen.safetensors"))
+        bad = combo.model().item(combo.findText("xl.safetensors"))
+        assert ok.isEnabled(), "같은 계열은 고를 수 있어야 한다"
+        assert not bad.isEnabled(), "다른 계열을 고를 수 있게 두었다"
+        assert "Qwen-Image 계열" in bad.toolTip()
+        assert "SDXL" in bad.toolTip(), "왜 안 되는지 알려야 한다"
+    finally:
+        window.close()
+
+
+def test_unknown_workflow_family_blocks_nothing(qapp, tmp_path):
+    """워크플로 계열을 모르면 아무것도 막지 않는다.
+
+    추측해서 막으면 쓸 수 있는 모델까지 못 쓰게 된다.
+    """
+    from test_model_family import _safetensors, QWEN_KEYS
+
+    window = _family_window(qapp, tmp_path)
+    try:
+        # 워크플로가 가리키는 모델을 지워 판별이 안 되게 만든다
+        (tmp_path / "models" / "diffusion_models" / "없는모델.safetensors").write_bytes(b"")
+        _show(window, _unet_workflow("없는모델.safetensors"))
+        combo = window.model_combos["unet"]
+        for name in ("qwen.safetensors", "xl.safetensors"):
+            item = combo.model().item(combo.findText(name))
+            assert item.isEnabled(), f"모르는 상태에서 {name} 을 막았다"
+    finally:
+        window.close()
