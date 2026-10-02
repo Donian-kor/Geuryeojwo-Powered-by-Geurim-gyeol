@@ -34,6 +34,8 @@ FAMILY_UNKNOWN = ""
 
 # (파일경로, 수정시각, 크기) -> 계열. 헤더를 매번 읽지 않도록.
 _CACHE: dict[tuple[str, float, int], str] = {}
+# 같은 형태의 키로 (파일경로, 수정시각, 크기) -> base/turbo.
+_VARIANT_CACHE: dict[tuple[str, str, float, int], str] = {}
 
 # 판별 가능한 입력 확장자
 _SAFE_SUFFIXES = (".safetensors",)
@@ -45,13 +47,90 @@ def _safetensors_keys(path: Path) -> list[str] | None:
     Returns:
         텐서 이름 목록. safetensors 가 아니면 None.
     """
+    header = _read_header(path)
+    if header is None:
+        return None
+    return [k for k in header if k != "__metadata__"]
+
+
+def _read_header(path: Path) -> dict | None:
+    """safetensors 헤더 전체를 읽는다. (가중치 본체는 읽지 않는다)
+
+    Returns:
+        파싱된 헤더 dict. safetensors 가 아니면 None.
+    """
     try:
         with path.open("rb") as handle:
             size = struct.unpack("<Q", handle.read(8))[0]
-            header = json.loads(handle.read(size).decode("utf-8"))
+            return json.loads(handle.read(size).decode("utf-8"))
     except Exception:
         return None
-    return [k for k in header if k != "__metadata__"]
+
+
+# 판별 불가. 모르는 것은 아무것도 막지 않는다.
+VARIANT_UNKNOWN = ""
+
+
+def _variant_from_metadata(header: dict) -> str:
+    """저장 때 같이 박힌 워크플로에서 Base / Turbo 를 구분한다.
+
+    회귀 근거: ERNIE-AIO-Base 와 ERNIE-AIO-Turbo 는 텐서 이름·모양·dtype 가
+    898개 전부 동일하다. distillation 관계라 가중치 구조로 구분이 안 되고,
+    계열 판별도 둘 다 'ernie' 로 같다. 그런데 헤더의 __metadata__.prompt 에
+    담아둔 UNETLoader 의 unet_name 에 turbo 가 명시돼 있다.
+
+        Base  -> ernie\\ernie-image-fp8.safetensors
+        Turbo -> ernie\\ernie-image-turbo-fp8.safetensors
+
+    Returns:
+        "turbo" 또는 "base". 이 AIO 패키지처럼 워크플로를 담아 준
+        파일에서만 나온다. 없는 파일은 VARIANT_UNKNOWN.
+    """
+    metadata = header.get("__metadata__")
+    if not isinstance(metadata, dict):
+        return VARIANT_UNKNOWN
+    # 저장할 때 워크플로를 담아 준 파일만 구별할 수 있다. 메타데이터가 비어
+    # 있으면 'turbo 가 없는 base' 라고 단정하면 안 된다. 단정하지 않고
+    # 모른다고 말해야 그 파일도 그대로 쓸 수 있다.
+    raw = metadata.get("prompt")
+    if not isinstance(raw, str) or not raw.strip():
+        return VARIANT_UNKNOWN
+    try:
+        prompt = json.loads(raw)
+    except (TypeError, ValueError):
+        return VARIANT_UNKNOWN
+    if not isinstance(prompt, dict):
+        return VARIANT_UNKNOWN
+    for node in prompt.values():
+        name = ((node or {}).get("inputs") or {}).get("unet_name")
+        if isinstance(name, str) and "turbo" in name.lower():
+            return "turbo"
+    return "base"
+
+
+def detect_model_variant(path: Path | str) -> str:
+    """같은 계열 안에서 Base / Turbo 를 가른다. 모르면 빈 문자열.
+
+    Args:
+        path: .safetensors 파일 경로
+
+    Returns:
+        "base" / "turbo" / VARIANT_UNKNOWN
+    """
+    path = Path(path)
+    if path.suffix.lower() not in _SAFE_SUFFIXES or not path.exists():
+        return VARIANT_UNKNOWN
+    try:
+        stat = path.stat()
+    except OSError:
+        return VARIANT_UNKNOWN
+    key = ("variant", str(path), stat.st_mtime, stat.st_size)
+    if key in _VARIANT_CACHE:
+        return _VARIANT_CACHE[key]
+    header = _read_header(path)
+    variant = _variant_from_metadata(header) if header else VARIANT_UNKNOWN
+    _VARIANT_CACHE[key] = variant
+    return variant
 
 
 def _classify(keys: list[str]) -> str:
@@ -118,6 +197,7 @@ def detect_file_family(path: Path | str) -> str:
 def clear_cache() -> None:
     """모델을 새로 설치했을 때 판별 결과를 버린다."""
     _CACHE.clear()
+    _VARIANT_CACHE.clear()
 
 
 def family_label(family: str) -> str:
@@ -152,18 +232,31 @@ def workflow_family(workflow, models_dir: Path | str = "") -> str:
 
 
 def compatible_models(names, family: str, models_dir: Path | str,
-                      folder: str) -> list[str]:
+                      folder: str, variant: str = VARIANT_UNKNOWN) -> list[str]:
     """설치된 모델 중 이 계열에 맞는 파일만 (파일명 목록).
 
     판별불가 파일은 남긴다. 추측해서 빼면 쓸 수 있는 모델까지 잃는다.
+
+    Args:
+        variant: 워크플로가 원하는 base/turbo. 모르면 빈 문자열이고
+            아무것도 걸러내지 않는다. (같은 계열에 한 종류만 있을 때)
     """
     if not family or not models_dir:
         return list(names)
     root = Path(models_dir) / folder
-    return [
+    result = [
         name for name in names
         if is_compatible(family, detect_file_family(root / name))
     ]
+    if not variant:
+        return result
+    same = [
+        name for name in result
+        if detect_model_variant(root / name) in (variant, VARIANT_UNKNOWN)
+    ]
+    # 원하는 변형이 하나도 없으면 걸러내지 않는다. Turbo 만 설치한 PC 에서
+    # '모델 없음' 이라고 말하면 사용자는 이유를 알 수 없다.
+    return same or result
 
 
 def prompt_model_files(prompt: dict) -> list[str]:

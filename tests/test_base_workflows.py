@@ -11,6 +11,8 @@ PC 에서 모든 항목이 '설치 안 됨' 으로 뜬다. 모델 이름은 비�
 """
 from __future__ import annotations
 
+import contextlib
+import json
 import shutil
 from pathlib import Path
 
@@ -97,12 +99,12 @@ def _plain_window(qapp, monkeypatch):
     return mw.MainWindow()
 
 
-def _show(window, name, models_dir):
+def _show(window, name, models_dir, options: dict | None = None):
     """base/ 아래 워크플로를 연 창을 만든다."""
     wf = load_workflow(BASE_DIR / f"{name}.json")
     window.engine.active_workflow = wf
     window.engine.config.models_dir = str(models_dir)
-    window._comfy_models = dict(OPTIONS)
+    window._comfy_models = dict(options or OPTIONS)
     clear_cache()
     window._setup_models(wf.parameters, wf.defaults())
     return window
@@ -157,6 +159,133 @@ def test_base_workflow_can_be_generated_from():
         wf = load_workflow(path)
         assert output_nodes(wf.prompt), f"{path.name} 에 저장 노드가 없다"
         assert check_fitness(wf.prompt) is None, path.name
+
+
+# --- 한 계열에 모델이 여럿인 경우 (ERNIE Base / Turbo) -----------------
+
+# ERNIE-Image 와 ERNIE-Image-Turbo 는 같은 계열이라 판별 결과가 같지만
+# 최적 스텝/guidance 가 정반대다. (각 HuggingFace 모델카드 권장값)
+ERNIE_EXPECTED = {
+    "ernie": (50, 4.0),        # Base  — 50 steps, guidance 4.0
+    "ernie-turbo": (8, 1.0),   # Turbo —  8 steps, guidance 1.0
+}
+
+
+@pytest.mark.parametrize("name,expected", sorted(ERNIE_EXPECTED.items()))
+def test_ernie_variants_keep_their_own_optimal_settings(name, expected):
+    """ERNIE Base 와 Turbo 는 서로 다른 워크플로로 배포한다.
+
+    회귀 근거: 두 모델이 최적값이 다르므로 워크플로를 나눴다. 그런데 둘을
+    한 파일로 합치면 어느 한쪽의 값(예: Turbo 에 50스텝)이 그대로 굳는다.
+    워크플로가 둘로 갈라져 있고 각자 권장값을 갖고 있는지 확인한다.
+    """
+    path = BASE_DIR / f"{name}.json"
+    assert path.exists(), f"{name}.json 이 없다"
+    defaults = load_workflow(path).defaults()
+    assert (defaults["steps"], defaults["cfg"]) == expected, name
+
+
+def test_ernie_variants_share_one_family():
+    """둘 다 'ernie' 계열이다. 계열을 쪼개지 않는다.
+
+    계열을 나누면 turbo 를 고르지 못하는 PC 에서 'ERNIE 계열 모델이
+    없습니다' 라고 잘못 말하게 된다.
+    """
+    for name in ERNIE_EXPECTED:
+        assert workflow_family(
+            load_workflow(BASE_DIR / f"{name}.json"), "없는/경로"
+        ) == "ernie", name
+
+
+def test_both_ernie_variants_are_listed():
+    """사용자가 고를 수 있어야 하므로 둘 다 목록에 잡혀야 한다."""
+    names = {p.name for p in list_workflows(BASE_DIR.parent)}
+    assert "ernie.json" in names
+    assert "ernie-turbo.json" in names
+
+
+def test_ernie_variants_have_distinct_names():
+    """드롭다운에서 구별돼야 한다. 이름이 같으면 고른 티가 안 난다."""
+    names = [load_workflow(BASE_DIR / f"{n}.json").name
+             for n in ERNIE_EXPECTED]
+    assert len(set(names)) == len(names), f"이름이 겹친다: {names}"
+
+
+@pytest.mark.parametrize("wf_name,variant", [("ernie", "base"),
+                                            ("ernie-turbo", "turbo")])
+def test_workflow_declares_its_variant(wf_name, variant):
+    """같은 계열의 두 워크플로가 원하는 변형을 밝힌다."""
+    meta = load_workflow(BASE_DIR / f"{wf_name}.json").meta
+    assert meta.get("variant") == variant, wf_name
+
+
+def test_other_base_workflows_declare_no_variant():
+    """ERNIE 처럼 Base/Turbo 쌍이 없는 계열은 변형을 밝히지 않는다.
+
+    잘못 밝히면 설치되지 않은 변형을 기다리며 모델 목록이 비어 보인다.
+    """
+    paired = {f"{n}.json" for n in ERNIE_EXPECTED}
+    for path in BASE_DIR.glob("*.json"):
+        if path.name in paired:
+            continue
+        meta = load_workflow(path).meta
+        assert meta.get("variant", "") == "", path.name
+
+
+# --- GUI 에서 자동으로 각 모델이 골라지는지 -------------------------------
+
+ERNIE_NAMES = ["ERNIE-AIO-Base.safetensors", "ERNIE-AIO-Turbo.safetensors"]
+
+
+@contextlib.contextmanager
+def _ernie_window(qapp, models_dir, monkeypatch, wf_name):
+    """ERNIE 계열 모델이 있는 창. 모델 목록을 ComfyUI 응답으로 흉내낸다."""
+    options = dict(OPTIONS)
+    options["checkpoints"] = list(ERNIE_NAMES)
+    monkeypatch.setattr(GeurimGyeolEngine, "model_options",
+                        lambda self: dict(options))
+    window = _plain_window(qapp, monkeypatch)
+    try:
+        _show(window, wf_name, models_dir, options)
+        yield window
+    finally:
+        window.close()
+
+
+@pytest.fixture
+def ernie_models_dir(tmp_path):
+    """Base 와 Turbo 가 함께 설치된 models 폴더."""
+    from test_model_family import ERNIE_KEYS, _safetensors
+
+    root = tmp_path / "models"
+    for folder in ("checkpoints", "diffusion_models", "text_encoders",
+                   "vae", "loras"):
+        (root / folder).mkdir(parents=True)
+    for name, inner in (("ERNIE-AIO-Base.safetensors", "ernie\\ernie-image-fp8.safetensors"),
+                        ("ERNIE-AIO-Turbo.safetensors", "ernie\\ernie-image-turbo-fp8.safetensors")):
+        _safetensors(root / "checkpoints" / name, ERNIE_KEYS,
+                     {"prompt": json.dumps({"2": {
+                         "class_type": "UNETLoader",
+                         "inputs": {"unet_name": inner}}})})
+    return root
+
+
+def test_turbo_workflow_auto_picks_turbo_model(qapp, ernie_models_dir,
+                                               monkeypatch):
+    """회귀: Turbo 워크플로를 열면 Turbo 모델이 자동으로 선택된다."""
+    with _ernie_window(qapp, ernie_models_dir, monkeypatch, "ernie-turbo") as window:
+        assert window.model_combos["checkpoint"].currentText() == (
+            "ERNIE-AIO-Turbo.safetensors"
+        )
+
+
+def test_base_workflow_auto_picks_base_model(qapp, ernie_models_dir,
+                                             monkeypatch):
+    """회귀: Base 워크플로를 열면 Base 모델이 자동으로 선택된다."""
+    with _ernie_window(qapp, ernie_models_dir, monkeypatch, "ernie") as window:
+        assert window.model_combos["checkpoint"].currentText() == (
+            "ERNIE-AIO-Base.safetensors"
+        )
 
 
 # --- GUI 동작 -------------------------------------------------------

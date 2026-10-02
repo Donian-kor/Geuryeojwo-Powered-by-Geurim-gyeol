@@ -1310,6 +1310,18 @@ class MainWindow(QWidget):
             return ""
         return workflow_family(self.engine.active_workflow, models_dir)
 
+    def _active_variant(self) -> str:
+        """현재 워크플로가 원하는 base/turbo. 모르면 빈 문자열.
+
+        같은 계열에 Base 와 Turbo 가 함께 있으면 최적값이 정반대다.
+        (ERNIE: Base 50스텝 cfg 4.0, Turbo 8스텝 cfg 1.0)
+        워크플로 파일이 "variant" 를 밝히면 그것을 쓴다.
+        """
+        workflow = self.engine.active_workflow
+        if workflow is None:
+            return ""
+        return (workflow.meta or {}).get("variant", "")
+
     def _auto_pick_model(self, folder: str, items: list[str]) -> str:
         """이 계열에 맞는 설치 모델 하나를 고른다. 없으면 빈 문자열.
 
@@ -1320,7 +1332,8 @@ class MainWindow(QWidget):
         family = self._active_family()
         if not family or not items:
             return ""
-        usable = compatible_models(items, family, self._models_dir(), folder)
+        usable = compatible_models(items, family, self._models_dir(), folder,
+                                  self._active_variant())
         return usable[0] if usable else ""
 
     def _setup_models(self, params: dict, defaults: dict,
@@ -1513,7 +1526,8 @@ class MainWindow(QWidget):
             installed = self._installed_models(key)
             if not installed:
                 continue  # ComfyUI 목록을 못 받았으면 판단을 보류한다
-            if compatible_models(installed, family, self._models_dir(), folder):
+            if compatible_models(installed, family, self._models_dir(), folder,
+                                self._active_variant()):
                 return ""
         label = family_label(family)
         return (

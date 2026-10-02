@@ -13,7 +13,8 @@ import struct
 from pathlib import Path
 
 from app.comfy.model_family import (
-    FAMILY_UNKNOWN, clear_cache, detect_file_family, detect_prompt_family,
+    FAMILY_UNKNOWN, VARIANT_UNKNOWN, clear_cache, compatible_models,
+    detect_file_family, detect_model_variant, detect_prompt_family,
     family_label, is_compatible, prompt_model_files,
 )
 
@@ -37,11 +38,11 @@ ERNIE_KEYS = ["model.diffusion_model.adaLN_modulation.weight",
               "text_encoders.ministral3_3b.layers.0.weight"]
 
 
-def _safetensors(path: Path, keys) -> Path:
+def _safetensors(path: Path, keys, metadata: dict | None = None) -> Path:
     """헤더만 있는 safetensors 를 만든다. 판별은 헤더만 읽는다."""
     header = {k: {"dtype": "F16", "shape": [1], "data_offsets": [0, 2]}
               for k in keys}
-    header["__metadata__"] = {}
+    header["__metadata__"] = metadata or {}
     blob = json.dumps(header).encode("utf-8")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(struct.pack("<Q", len(blob)) + blob)
@@ -150,3 +151,114 @@ def test_cache_is_refreshed_when_the_model_is_replaced(tmp_path):
 
     clear_cache()
     assert detect_file_family(path) == "qwen-image"
+# --- 같은 계열 안에서 Base / Turbo 가르기 ---------------------------------
+
+# 실측: ERNIE-AIO-Base 와 ERNIE-AIO-Turbo 의 헤더에서 텐서 이름·모양·dtype 는
+# 898개 전부 같았다. distillation 관계라 가중치로는 구분이 안 된다.
+# 구별점은 헤더의 __metadata__.prompt 에 담아둔 UNETLoader.unet_name 이다.
+def _ernie_aio(root: Path, turbo: bool) -> Path:
+    """Base/Turbo 쌍을 models 폴더에 만들어 넣는다.
+
+    회귀 근거: 두 모델을 순서대로 넣어야 하는데, _models_dir() 를 두 번
+    부르면 같은 폴더를 다시 만들려다 예외가 난다. 한 번만 만들고 거기다
+    두 개를 넣는다.
+    """
+    inner = "ernie\\ernie-image-turbo-fp8.safetensors" if turbo \
+        else "ernie\\ernie-image-fp8.safetensors"
+    metadata = {"prompt": json.dumps({
+        "2": {"class_type": "UNETLoader", "inputs": {"unet_name": inner}},
+    })}
+    name = "ERNIE-AIO-Turbo.safetensors" if turbo else "ERNIE-AIO-Base.safetensors"
+    return _safetensors(root / "checkpoints" / name, ERNIE_KEYS, metadata)
+
+
+def test_variant_read_from_metadata(tmp_path):
+    """저장 때 박힌 워크플로의 unet_name 으로 base/turbo 를 가른다."""
+    root = _models_dir(tmp_path)
+    assert detect_model_variant(_ernie_aio(root, turbo=False)) == "base"
+    assert detect_model_variant(_ernie_aio(root, turbo=True)) == "turbo"
+
+
+def test_variant_unknown_without_metadata(tmp_path):
+    """메타데이터가 없으면 모른다고 말한다. 추측하지 않는다."""
+    root = _models_dir(tmp_path)
+    path = _safetensors(root / "checkpoints" / "plain.safetensors", ERNIE_KEYS)
+    assert detect_model_variant(path) == VARIANT_UNKNOWN
+
+
+def test_variant_unknown_for_broken_metadata(tmp_path):
+    """메타데이터 prompt 가 깨져도 죽지 않고 모른다고 말한다."""
+    root = _models_dir(tmp_path)
+    path = _safetensors(root / "checkpoints" / "bad.safetensors", ERNIE_KEYS,
+                        {"prompt": "{ 깨진 JSON"})
+    assert detect_model_variant(path) == VARIANT_UNKNOWN
+
+
+def test_variant_of_non_safetensors(tmp_path):
+    """safetensors 가 아니면 모른다."""
+    path = tmp_path / "x.safetensors"
+    path.write_bytes(b"not a safetensors file")
+    assert detect_model_variant(path) == VARIANT_UNKNOWN
+
+
+def test_turbo_workflow_picks_turbo_model(tmp_path):
+    """회귀: turbo 워크플로는 Turbo 모델을 자동으로 고른다.
+
+    둘 다 같은 계열이라 계열 판별만으로는 구분되지 않아 목록 첫 항목
+    (Base) 이 선택됐다.
+    """
+    names = ["ERNIE-AIO-Base.safetensors", "ERNIE-AIO-Turbo.safetensors"]
+    root = _models_dir(tmp_path)
+    _ernie_aio(root, turbo=False)
+    _ernie_aio(root, turbo=True)
+    clear_cache()
+    got = compatible_models(names, "ernie", root, "checkpoints", "turbo")
+    assert got == ["ERNIE-AIO-Turbo.safetensors"]
+
+
+def test_base_workflow_picks_base_model(tmp_path):
+    """회귀: base 워크플로는 Base 모델을 자동으로 고른다."""
+    names = ["ERNIE-AIO-Base.safetensors", "ERNIE-AIO-Turbo.safetensors"]
+    root = _models_dir(tmp_path)
+    _ernie_aio(root, turbo=False)
+    _ernie_aio(root, turbo=True)
+    clear_cache()
+    got = compatible_models(names, "ernie", root, "checkpoints", "base")
+    assert got == ["ERNIE-AIO-Base.safetensors"]
+
+
+def test_missing_variant_does_not_hide_models(tmp_path):
+    """원하는 변형이 하나도 없으면 걸러내지 않는다.
+
+    Turbo 만 설치한 PC 에서 '모델 없음' 이라고 말하면 사용자는 이유를
+    알 수 없다.
+    """
+    names = ["ERNIE-AIO-Base.safetensors"]
+    root = _models_dir(tmp_path)
+    _ernie_aio(root, turbo=False)
+    clear_cache()
+    got = compatible_models(names, "ernie", root, "checkpoints", "turbo")
+    assert got == names
+
+
+def test_no_variant_filter_keeps_every_model(tmp_path):
+    """변형을 안 물으면 아무것도 걸러내지 않는다. (기존 동작 유지)"""
+    names = ["ERNIE-AIO-Base.safetensors", "ERNIE-AIO-Turbo.safetensors"]
+    root = _models_dir(tmp_path)
+    _ernie_aio(root, turbo=False)
+    _ernie_aio(root, turbo=True)
+    clear_cache()
+    got = compatible_models(names, "ernie", root, "checkpoints")
+    assert got == names
+
+
+def test_variant_cache_is_refreshed_when_the_model_is_replaced(tmp_path):
+    """파일 교체는 변형 판별에도 반영된다."""
+    root = _models_dir(tmp_path)
+    path = root / "checkpoints" / "m.safetensors"
+    _safetensors(path, ERNIE_KEYS)
+    assert detect_model_variant(path) == VARIANT_UNKNOWN
+    turbo = _ernie_aio(root, turbo=True)
+    assert detect_model_variant(turbo) == "turbo"
+    clear_cache()
+    assert detect_model_variant(turbo) == "turbo"
