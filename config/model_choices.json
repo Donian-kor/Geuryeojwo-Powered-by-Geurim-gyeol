@@ -1,0 +1,13 @@
+{
+  "ernie-turbo": {
+    "checkpoint": "ERNIE-AIO-Turbo-fp8.safetensors",
+    "local_model": "qwen_pe_t2i_heretic-Q4_K_M.gguf"
+  },
+  "krea2 turbo t2i": {
+    "unet": "krea2_turbo_nvfp4.safetensors",
+    "clip": "qwen3vl_4b_fp8_scaled.safetensors",
+    "clip_type": "krea2",
+    "vae": "qwen_image_2.1_vae_bf16.safetensors",
+    "lora": "krea2_softwatercolor.safetensors"
+  }
+}
