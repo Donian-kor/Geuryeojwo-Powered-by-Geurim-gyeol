@@ -18,6 +18,46 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+@pytest.fixture(autouse=True)
+def no_real_gpu_reader(monkeypatch):
+    """GUI 테스트가 실제 nvidia-smi 를 띄우지 않게 한다.
+
+    회귀 근거: MainWindow.__init__ 이 창을 만들 때마다 GpuUsageReader 를
+    만들어 nvidia-smi 프로세스와 읽기 스레드를 띄운다. 테스트는 창을
+    19 곳에서 만드는데, 닫히지 않은 창이 남으면 스레드가 파이프를 읽은
+    채로 살아 있다. 스위트 끝에 프로그램이 종료되며 그것이
+    'access violation' 으로 죽었다. (gpu_usage.py 의 for line in proc.stdout)
+
+    단위 테스트가 실제 하드웨어에 의존해서는 안 된다. 상태 표시만 보면 되는
+    곳에 GPU 프로세스가 필요하지 않다. GpuUsageReader 자체는
+    tests/test_gpu_usage.py 가 가짜 프로세스로 따로 검증한다.
+
+    읽히면 '지원 안 함' 으로 표시되므로 상태 표시 테스트에 영향이 없다.
+    """
+    class _StubGpuUsage:
+        started = False
+        available = False
+
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+        def percent(self):
+            return None
+
+        def vram(self):
+            return (None, None)
+
+        def vram_gb(self):
+            return (None, None)
+
+    monkeypatch.setattr(
+        "app.gui.main_window.GpuUsageReader", _StubGpuUsage, raising=False
+    )
+
+
 @pytest.fixture(scope="session")
 def project_root() -> Path:
     """프로젝트 루트 경로."""

@@ -31,6 +31,7 @@ class GpuUsageReader:
         self.available = False
         self._attempted = False
         self._proc: subprocess.Popen | None = None
+        self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._percent: float | None = None
         self._vram_used_mb: float | None = None
@@ -72,14 +73,24 @@ class GpuUsageReader:
             return
 
         self.available = True
-        threading.Thread(
+        self._thread = threading.Thread(
             target=self._pump, name="nvidia-smi-reader", daemon=True
-        ).start()
+        )
+        self._thread.start()
 
     def stop(self) -> None:
-        """감시 프로세스를 정리한다."""
+        """감시 프로세스를 정리한다.
+
+        시도 표시를 지워 다시 start() 할 수 있게 한다. 지우지 않으면
+        stop() 한 번으로 그 리더는 영영 켜지지 않는다 (start() 의 가드에
+        걸린다). 부르는 쪽은 closeEvent 뿐이고 그때는 타이머도 멈추므로
+        매 초 재시도가 되살아나지는 않는다.
+        """
         proc = self._proc
+        thread = self._thread
         self._proc = None
+        self._thread = None
+        self._attempted = False
         self.available = False
         self._percent = None
         self._vram_used_mb = None
@@ -89,16 +100,26 @@ class GpuUsageReader:
         try:
             if proc.poll() is None:
                 proc.terminate()
-                proc.wait(timeout=2)
+                proc.wait(timeout=5)
         except Exception:
             # 종료 실패로 프로그램이 멈추면 안 된다
             pass
         finally:
-            try:
-                if proc.stdout is not None:
+            # 회귀 근거: 읽는 스레드가 for line in proc.stdout 으로 파이프를
+            # 순회하는 중 stdout 을 닫으면 그대로 access violation 으로 죽는다.
+            # (창을 닫을 때 nvidia-smi 가 아직 한 줄을 내보내는 타이밍)
+            # 프로세스를 끝내면 파이프가 EOF 에 닿아 순회가 스스로 끝난다.
+            # 스레드가 완전히 종료된 뒤에만 파이프를 닫는다.
+            if thread is not None and thread.is_alive():
+                # 프로세스 종료 후 파이프 EOF 도달까지 넉넉히 대기
+                thread.join(timeout=5)
+            # 스레드가 여전히 살아있다면(이론상 드물다) 파이프 닫기를 건너뛰고
+            # OS가 정리하도록 둔다. 강제 닫기는 access violation 유발.
+            if proc.stdout is not None:
+                try:
                     proc.stdout.close()
-            except Exception:
-                pass
+                except Exception:
+                    pass
 
     # ---------------------------------------------------------------- 읽기
 

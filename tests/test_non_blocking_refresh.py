@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import shutil
 import time
+from pathlib import Path
 
 import pytest
 
@@ -81,6 +82,19 @@ def slow_engine(qapp, tmp_path, monkeypatch, project_root):
         monkeypatch.setattr(GeurimGyeolEngine, "refresh_status", _fake_status)
         monkeypatch.setattr(GeurimGyeolEngine, "model_options", _fake_models)
         monkeypatch.setattr(GeurimGyeolEngine, "sampler_options", _fake_samplers)
+        # 회귀 근거: 아래 두 조회를 가짜로 만들지 않으면 워커가 실제
+        # ComfyUI 에 접속해 /object_info(2.5MB) 를 받는다. 서버가 켜져
+        # 있으면 3초를 넘겨 closeEvent 의 wait(3000) 가 시간초과하고,
+        # 실행 중인 QThread 가 창과 함께 소멸하면서 프로세스가 죽는다.
+        # ('access violation')
+        monkeypatch.setattr(
+            GeurimGyeolEngine, "enhancer_status",
+            lambda self: (False, "테스트에서는 인핸서를 쓰지 않는다"),
+        )
+        monkeypatch.setattr(
+            GeurimGyeolEngine, "input_options",
+            lambda self, node_class, input_name: ["qwen_image", "lumina2"],
+        )
         monkeypatch.setattr(mw, "ROOT", root)
 
         window = mw.MainWindow()
@@ -163,6 +177,25 @@ def test_refresh_keeps_user_model_selection(slow_engine, qapp):
         w.close()
 
 
+def test_repeated_refresh_keeps_window_alive(slow_engine, qapp):
+    """새로고침을 연달아 눌러도 죽지 않는다 (워커 교체 수명주기).
+
+    크래시는 프로세스 사망이라 assert 대신 실행 자체로 검증된다.
+    죽으면 이 테스트가 아니라 스위트 전체가 중단된다.
+    """
+    w = slow_engine()
+    try:
+        _wait_worker(qapp, w)
+        for _ in range(3):
+            w.refresh_models()
+            _wait_worker(qapp, w)
+        assert w._info_worker is not None, "워커가 사라졌다"
+        assert w.status_refresh.isEnabled(), "조회 후 버튼이 그대로 꺼져 있다"
+    finally:
+        _wait_worker(qapp, w)
+        w.close()
+
+
 def test_refresh_fills_models_after_worker(slow_engine, qapp):
     """백그라운드 조회가 끝나면 목록이 채워진다."""
     w = slow_engine()
@@ -174,3 +207,69 @@ def test_refresh_fills_models_after_worker(slow_engine, qapp):
     finally:
         _wait_worker(qapp, w)
         w.close()
+
+
+def test_repeated_refresh_rebuilds_lora_rows_without_leaking(qapp):
+    """LoRA 강도 줄을 여러 번 다시 만들어도 옛 줄이 Qt 트리에 남지 않는다.
+
+    회귀 근거: _setup_lora_strength 는 줄을 지울 때 takeAt(0) 으로 항목을
+    꺼냈는데, 꺼낸 것은 위젯이 아니라 자식 QHBoxLayout 이었다.
+    그래서 item.widget() 는 항상 None 이고 라벨·슬라이더는 계속 살아 있다.
+    파이썬 참조만 끊기니 Qt 쪽 참조(레이아웃·시그널)가 깨진 객체를 가리켜
+    곧바로 만드는 QThread 이 access violation(0xC0000005) 으로 죽었다.
+
+    크래시라 assert 로는 잡을 수 없다. 옛 줄이 Qt 트리에서 실제로 사라졌는지를
+    보아 '누수가 생기지 않는다'는 것을 확인한다. (실행 자체로 죽음도 검증된다)
+    """
+    import shiboken6
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    from app.gui.main_window import MainWindow
+
+    window = MainWindow()
+    try:
+        # 워크플로가 아직 없을 수 있다. LoRA 노드가 있는 워크플로를 물려줘
+        # 강도 줄이 생기게 만든다.
+        from app.comfy.workflow import Workflow, infer_parameters
+
+        prompt = {
+            "1": {"class_type": "UNETLoader",
+                  "inputs": {"unet_name": "u.safetensors"}},
+            "2": {"class_type": "LoraLoaderModelOnly",
+                  "inputs": {"lora_name": "lora0.safetensors",
+                             "strength_model": 0.8, "model": ["1", 0]}},
+            "9": {"class_type": "KSampler",
+                  "inputs": {"seed": 1, "steps": 20, "cfg": 4.0,
+                             "sampler_name": "euler", "scheduler": "normal",
+                             "denoise": 1, "model": ["2", 0],
+                             "positive": ["3", 0], "latent_image": ["5", 0]}},
+        }
+        specs = infer_parameters(prompt)
+        workflow = Workflow(
+            path=Path("메모리.json"), name="메모리", description="",
+            output_node="", prompt=prompt, parameters=specs,
+        )
+        window.engine.active_workflow = workflow
+
+        window._setup_lora_strength(specs, workflow.defaults())
+        first = [slider for _key, _label, slider in window._lora_sliders]
+        assert first, "LoRA 강도 줄이 안 생겼다"
+
+        # 다시 만들면 옛 줄은 Qt 트리에서 떨어져야 한다.
+        window._setup_lora_strength(specs, workflow.defaults())
+        second = [slider for _key, _label, slider in window._lora_sliders]
+        assert second and all(s is not first[0] for s in second), (
+            "새로 만들었는데 옛 슬라이더가 그대로 남아 있다"
+        )
+        assert first[0].parent() is None, (
+            "옛 슬라이더가 강도 칸에 달린 채 남아 있다 — 정리 루프가 안 돌았다"
+        )
+
+        # deleteLater 는 DeferredDelete 이벤트가 있어야 실행된다.
+        # processEvents() 만으로는 처리되지 않으니 직접 보내 준다.
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        assert not shiboken6.isValid(first[0]), (
+            "옛 슬라이더가 deleteLater 후에도 살아 있다 — 레이아웃 정리 누락"
+        )
+    finally:
+        window.close()

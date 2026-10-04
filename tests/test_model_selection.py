@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,39 @@ FAKE_OPTIONS = {
 
 MISSING = "MISSING-MODEL.safetensors"
 RED = "#ff6b6b"
+
+# 백그라운드 조회의 결과가 목록에 반영될 때까지 기다리는 상한.
+# 워커는 네트워크 I/O 를 하므로 PC 사양과 ComfyUI 응답에 따라 시간이
+# 들쭉날쭉하다. 여기서 대기를 고정하면 워커가 아직일 때 테스트가 시작해
+# 목록이 비어 있고, 그 결과가 '설치 안 된 모델을 목록에서 지웠다' 는
+# 잘못된 실패로 보인다. (실제로 그랬다)
+_WAIT_LIMIT_SECONDS = 30.0
+
+
+def _wait_models(window, qapp) -> None:
+    """백그라운드 조회가 끝나 목록이 채워질 때까지 기다린다.
+
+    워커가 끝났다는 것과 시그널이 위젯에 반영됐다는 것은 별개다.
+    시그널은 GUI 스레드에서 처리되므로 둘 다 확인해야 한다.
+
+    Args:
+        window: MainWindow
+        qapp: QApplication (이벤트를 펄 때 쓴다)
+    """
+    worker = window._info_worker
+    if worker is None:
+        return
+    deadline = time.monotonic() + _WAIT_LIMIT_SECONDS
+    while worker.isRunning() and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+    worker.wait(int(_WAIT_LIMIT_SECONDS * 1000))
+    # 시그널이 반영될 때까지 이벤트를 돌린다
+    for _ in range(20):
+        if window._comfy_models:
+            break
+        qapp.processEvents()
+        time.sleep(0.01)
 
 
 class _StubResult:
@@ -114,16 +148,19 @@ def make_window(qapp, tmp_path, monkeypatch, project_root):
         monkeypatch.setattr(
             GeurimGyeolEngine, "online", property(lambda self: True)
         )
+        # 인핸서 조회는 실제 서버의 /object_info(2.5MB) 를 부른다. 막지 않으면
+        # 워커가 PC 속도·서버 응답에 따라 5초 넘게 걸려 실행마다 결과가 달라진다.
+        monkeypatch.setattr(
+            GeurimGyeolEngine, "enhancer_status",
+            lambda self: (False, "테스트에서는 인핸서를 쓰지 않는다"),
+        )
         monkeypatch.setattr(mw, "ROOT", root)
 
         window = mw.MainWindow()
         qapp.processEvents()
         # 서버 조회는 백그라운드 워커가 하므로, 끝날 때까지 기다려
         # 위젯에 반영시킨 뒤 돌려준다 (그대로 두면 목록이 비어 있다)
-        if window._info_worker is not None:
-            window._info_worker.wait(5000)
-        for _ in range(5):
-            qapp.processEvents()
+        _wait_models(window, qapp)
         return window
 
     return _build
@@ -315,14 +352,15 @@ def make_sd_window(qapp, tmp_path, monkeypatch, project_root):
         monkeypatch.setattr(
             GeurimGyeolEngine, "online", property(lambda self: True)
         )
+        monkeypatch.setattr(
+            GeurimGyeolEngine, "enhancer_status",
+            lambda self: (False, "테스트에서는 인핸서를 쓰지 않는다"),
+        )
         monkeypatch.setattr(mw, "ROOT", root)
 
         window = mw.MainWindow()
         qapp.processEvents()
-        if window._info_worker is not None:
-            window._info_worker.wait(5000)
-        for _ in range(5):
-            qapp.processEvents()
+        _wait_models(window, qapp)
         return window
 
     return _build
@@ -509,9 +547,23 @@ def _plain_window(qapp):
     GeurimGyeolEngine.sampler_options = (
         lambda self: {"sampler": ["euler"], "scheduler": ["normal"]}
     )
+    # 회귀 근거: 인핸서 조회는 실제 서버의 /object_info(2.5MB) 를 부른다.
+    # 막지 않으면 워커가 오래 걸려 closeEvent 의 3초 대기를 넘기고,
+    # 실행 중인 스레드가 창과 함께 소멸하며 프로그램이 죽는다.
+    # 값은 '사용 가능' 으로 둔다. 서버가 켜져 있을 때의 실제 동작과
+    # 같아야 인접어 칸을 다루는 테스트의 기대가 유지된다.
+    GeurimGyeolEngine.enhancer_status = (
+        lambda self: (True, "테스트용 인핸서 사용 가능")
+    )
     GeurimGyeolEngine.online = property(lambda self: True)
     qapp.processEvents()
-    return mw.MainWindow()
+    window = mw.MainWindow()
+    # 회귀 근거: 여기서 워커를 기다리지 않으면 조회가 늦게 끝나 테스트
+    # 도중에 _comfy_models 를 덮어쓴다. _show_loras 가 넣어 둔 lora 목록이
+    # 지워지며 'lora' 칸이 사라져 KeyError 가 났다.
+    # ('lora' 칸은 목록이 비어 있으면 아예 만들지 않는다)
+    _wait_models(window, qapp)
+    return window
 
 
 @pytest.mark.parametrize("cls,count,expected", [

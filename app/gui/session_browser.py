@@ -441,13 +441,11 @@ class HistoryBrowser(QWidget):
         if reply != QMessageBox.Yes:
             return
 
-        item = self._current_item
-        if item is not None:
-            # 세션 폴더만 지우면 outputs 원본이 미분류로 남는다.
-            # 세션이 참조하던 원본을 먼저 정리한다.
-            for source in self._sources_of(session_path):
-                self._delete_source_output(source)
+        # item 유무와 상관없이 outputs 원본을 먼저 정리한다.
+        for source in self._sources_of(session_path):
+            self._delete_source_output(source)
 
+        item = self._current_item
         self.session_manager.delete_session(session_path)
         self._remove_rows_of_session(item, session_path)
         self._forget_selection()

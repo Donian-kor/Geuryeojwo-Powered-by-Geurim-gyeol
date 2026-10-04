@@ -246,6 +246,31 @@ def test_start_is_idempotent(monkeypatch):
 
 
 
+def test_can_restart_after_stop(monkeypatch):
+    """stop() 뒤에 start() 하면 다시 읽는다.
+
+    회귀: _attempted 를 리셋하지 않아 한 번 stop() 한 리더는 다시 켜지지
+    않았다 (start() 의 재시도 가드에 걸려 무조건 no-op).
+    """
+    proc = _FakeProc(["10\n"])
+    calls = []
+
+    def fake_popen(*args, **kwargs):
+        calls.append(1)
+        return proc
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    reader = GpuUsageReader()
+    reader.start()
+    reader.stop()
+    assert reader.started is False, "stop() 뒤에도 '시도함' 으로 남아 있다"
+
+    reader.start()
+
+    assert len(calls) == 2, f"다시 켜지지 않았다 (프로세스 시도 {len(calls)}번)"
+    assert reader.available is True
+
+
 # ------------------------------------------------------------------ 플랫폼
 
 def test_no_window_flag_only_on_windows(monkeypatch):

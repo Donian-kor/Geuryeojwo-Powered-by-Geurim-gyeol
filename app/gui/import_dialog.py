@@ -47,8 +47,8 @@ class NodeTypesWorker(QThread):
 
     fetched = Signal(object)
 
-    def __init__(self, engine):
-        super().__init__()
+    def __init__(self, engine, parent=None):
+        super().__init__(parent)
         self.engine = engine
 
     def run(self) -> None:
@@ -257,7 +257,10 @@ class ImportWorkflowDialog(QDialog):
         """노드 종류는 필요할 때 한 번만 읽는다. (응답이 매우 크다)"""
         if self._known_types is not None or self._engine is None:
             return
-        self._worker = NodeTypesWorker(self._engine)
+        # 부모를 넘겨 이 대화상자가 워커의 수명을 갖게 한다. 부모가 없으면
+        # 참조가 끊기는 순간 파이썬 GC 가 QThread 를 회수하고, 그 시점이
+        # 스레드 종료 직후와 겹치면 access violation 으로 죽는다.
+        self._worker = NodeTypesWorker(self._engine, self)
         self._worker.fetched.connect(self._on_node_types)
         self._worker.start()
 
@@ -295,6 +298,13 @@ class ImportWorkflowDialog(QDialog):
 
     def source_path(self):
         return self._path
+
+    def closeEvent(self, event):
+        """창 닫힐 때 워커를 안전하게 종료한다."""
+        if self._worker is not None:
+            self._worker.quit()
+            self._worker.wait(2000)
+        super().closeEvent(event)
 
     def document(self):
         return self._data

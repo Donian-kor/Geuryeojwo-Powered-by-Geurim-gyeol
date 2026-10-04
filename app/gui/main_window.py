@@ -1545,12 +1545,37 @@ class MainWindow(QWidget):
         실제 ComfyUI 입력 이름이 strength_model·strength_clip 등
         여러 가지라 파라미터 키(lora_strength, lora_strength2)로 맞춘다.
         (_setup_models 가 그 키로 값을 만든다)
+
+        회귀 근거: 아래 while 은 takeAt(0) 으로 _lora_rows 에서 항목을
+        꺼내지만, 꺼낸 항목은 QLayout(자식 QHBoxLayout) 이다
+        item.widget() 는 그래서 항상 None 이며 라벨·슬라이더는 그대로
+        남는다. 남은 위젯을 파이썬이 참조하지 않게 되니 GC 가 그것들을
+        파괴하는데 Qt 쪽 레이아웃/시그널 연결은 이미 그 객체를
+        가리키고 있다. 그래서 워크플로를 다시 고를 때마다 깨진 참조를
+        다시 만지고, 곧이어 생성하는 QThread 이 access violation
+        (0xC0000005) 으로 죽는다.
+
+        해결: 자식 레이아웃 안의 위젯까지 직접 떼어 내고, 그다음에야
+        비워진 자식 레이아웃을 버린다. 전부 정리한 뒤에야 GC 대상이 된다.
         """
         while self._lora_rows.count():
             item = self._lora_rows.takeAt(0)
+            # 꺼낸 것이 위젯일 수도, 위젯을 담은 자식 레이아웃일 수도 있다.
             widget = item.widget()
             if widget is not None:
                 widget.setParent(None)
+                widget.deleteLater()
+                continue
+            sub = item.layout()
+            if sub is not None:
+                # 자식 레이아웃의 위젯을 먼저 떼어 낸다.
+                # 이래야 Qt 쪽 참조와 파이썬 참조가 함께 끊긴다.
+                while sub.count():
+                    sub_item = sub.takeAt(0)
+                    sub_widget = sub_item.widget()
+                    if sub_widget is not None:
+                        sub_widget.setParent(None)
+                        sub_widget.deleteLater()
         self._lora_sliders = []
 
         keys = [

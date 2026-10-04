@@ -230,18 +230,35 @@ class ComfyUIConfig:
         if path.exists():
             try:
                 data.update(json.loads(path.read_text(encoding="utf-8")))
+                # 타입 변환도 try 안에서 — 깨진 설정으로 크래시 방지
+                port = int(data.get("port", 8188))
+                timeout_seconds = int(data.get("timeout_seconds", 300))
+                connect_timeout_seconds = int(data.get("connect_timeout_seconds", 5))
+                launch_wait_seconds = int(data.get("launch_wait_seconds", 90))
+                model_folders = list(data.get("model_folders", DEFAULT_CONFIG["model_folders"]))
             except Exception:
-                pass
+                # 타입 변환 실패 시 기본값 사용
+                port = 8188
+                timeout_seconds = 300
+                connect_timeout_seconds = 5
+                launch_wait_seconds = 90
+                model_folders = list(DEFAULT_CONFIG["model_folders"])
+        else:
+            port = 8188
+            timeout_seconds = 300
+            connect_timeout_seconds = 5
+            launch_wait_seconds = 90
+            model_folders = list(DEFAULT_CONFIG["model_folders"])
         return cls(
             host=data.get("host", "127.0.0.1"),
-            port=int(data.get("port", 8188)),
-            timeout_seconds=int(data.get("timeout_seconds", 300)),
-            connect_timeout_seconds=int(data.get("connect_timeout_seconds", 5)),
+            port=port,
+            timeout_seconds=timeout_seconds,
+            connect_timeout_seconds=connect_timeout_seconds,
             auto_launch=bool(data.get("auto_launch", False)),
             launch_command=data.get("launch_command", ""),
             launch_working_dir=data.get("launch_working_dir", ""),
-            launch_wait_seconds=int(data.get("launch_wait_seconds", 90)),
-            model_folders=list(data.get("model_folders", DEFAULT_CONFIG["model_folders"])),
+            launch_wait_seconds=launch_wait_seconds,
+            model_folders=model_folders,
             models_dir=str(data.get("models_dir", "")),
         )
 
