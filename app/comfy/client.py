@@ -364,13 +364,58 @@ class ComfyClient:
             raise ComfyUIError(f"이미지 다운로드 실패: {exc}") from exc
 
     async def interrupt(self) -> None:
-        """POST /interrupt — 실행 중단 (v0.2 §6)."""
+        """POST /interrupt — 실행 중단 (v0.2 §6).
+
+        ComfyUI 는 이 신호를 '노드 경계'에서만 본다. 한 노드가 오래
+        걸리면(LLM 프롬프트 정리 등) 다음 경계까지 기다려야 하므로
+        사용자에게는 "중지됨"이 아니라 "중지 중..." 으로 보여야 한다.
+        """
         try:
             await self._post("/interrupt", {}, timeout=10)
         except ComfyUIError:
             pass
 
+    def interrupt_now(self, timeout: float = 5.0) -> bool:
+        """중단을 **생성 스레드와 무관하게** 즉시 전송한다 (동기).
 
+        왜 별도 경로가 필요한가:
+        생성 중이면 엔진의 _loop_lock 을 생성 스레드가 쥐고 있다.
+        기존 cancel() 은 그 잠금을 얻으려고 기다렸다가, 전송하기 전에
+        생성이 끝나버려 /interrupt 가 한 번도 안 나갔다.
+        여기서는 잠금을 전혀 쓰지 않고, 이 호출 자체가 만든 짧은 수명의
+        HTTP 클라이언트로 바로 보낸다. 호출자는 곧바로 반환한다.
+
+        Args:
+            timeout: ComfyUI 응답 대기 초. 실패해도 예외를 던지지 않는다.
+
+        Returns:
+            bool: 중단 요청이 서버에 도착했으면 True.
+        """
+        try:
+            with httpx.Client(
+                base_url=self.config.base_url,
+                timeout=timeout,
+            ) as http:
+                response = http.post("/interrupt", json={})
+                return response.status_code < 400
+        except Exception:
+            return False
+
+    def clear_queue_now(self, timeout: float = 5.0) -> bool:
+        """POST /queue {"clear": true} — 대기 중(미시작) 작업만 지운다.
+
+        /interrupt 는 '지금 실행 중인' 것만 멈춘다. 그 뒤에 줄 선
+        작업은 계속 돌아가므로 그것도 함께 비워야 중지가 완전히 된다.
+        """
+        try:
+            with httpx.Client(
+                base_url=self.config.base_url,
+                timeout=timeout,
+            ) as http:
+                response = http.post("/queue", json={"clear": True})
+                return response.status_code < 400
+        except Exception:
+            return False
 
     # --- WebSocket 진행률 (v0.2 §4.4, §6) -----------------------
 
@@ -587,6 +632,43 @@ def _input_options(spec) -> list[str]:
             return []
         return _extract_options(spec[1] if len(spec) > 1 else None)
     return _extract_options(spec)
+
+
+def _input_kind(spec) -> str:
+    """입력 정의 한 개에서 종류 이름만 뽑는다. 모르면 빈 문자열.
+
+    형태가 두 가지다.
+    - ["COMBO", {...}] / ["INT", {...}]   → 첫 항목이 종류 이름
+    - [["a", "b"], {...}]                → 선택지 목록이 붙은 입력(COMBO)
+    """
+    if not isinstance(spec, list) or not spec:
+        return ""
+    first = spec[0]
+    if isinstance(first, str):
+        return first.upper()
+    return "COMBO" if first else ""
+
+
+def node_input_kinds(node: dict) -> dict[str, str]:
+    """노드 정의에서 입력 이름 -> 종류를 모두 뽑는다. (COMBO/INT/… )
+
+    커스텀 노드의 선택형 입력을 찾을 때 쓴다. object_info 정의 모양을
+    아는 곳은 여기뿐이라 해석도 여기서 한다. (엔진은 이 함수만 쓴다)
+
+    Args:
+        node: /object_info 응답의 한 노드 (정의 dict)
+
+    Returns:
+        dict[str, str]: {입력 이름: 종류}. 정의가 없으면 빈 dict.
+    """
+    inputs = (node.get("input") or {}) if isinstance(node, dict) else {}
+    kinds: dict[str, str] = {}
+    for group in ("required", "optional"):
+        for name, spec in (inputs.get(group) or {}).items():
+            kind = _input_kind(spec)
+            if kind:
+                kinds[str(name)] = kind
+    return kinds
 
 
 def _input_default(spec):

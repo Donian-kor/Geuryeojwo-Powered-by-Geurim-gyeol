@@ -724,7 +724,7 @@ def test_clip_type_row_appears_next_to_the_clip_files(qapp):
     """
     window = _plain_window(qapp)
     try:
-        window._comfy_input_options = {"DualCLIPLoader": list(CLIP_TYPE_OPTIONS)}
+        window._comfy_input_options = {"DualCLIPLoader.type": list(CLIP_TYPE_OPTIONS)}
         _show(window, _clip_workflow("DualCLIPLoader", 2, clip_type="flux"))
         _show_model_tab(qapp, window)
         assert "clip_type" in window.model_combos, "CLIP 타입 칸이 없다"
@@ -759,7 +759,7 @@ def test_chosen_clip_type_and_files_reach_the_request(qapp):
     """
     window = _plain_window(qapp)
     try:
-        window._comfy_input_options = {"DualCLIPLoader": list(CLIP_TYPE_OPTIONS)}
+        window._comfy_input_options = {"DualCLIPLoader.type": list(CLIP_TYPE_OPTIONS)}
         # 실제로 고를 수 있게 설치된 CLIP 목록을 채운다
         window._comfy_models = {
             **SD_OPTIONS,
@@ -1226,5 +1226,140 @@ def test_base_workflow_cannot_be_deleted(qapp, tmp_path, project_root,
         window._on_delete_workflow()
         assert (root / "workflows" / "base" / "sd.json").exists()
         assert "지울 수 없습니다" in window.status.text()
+    finally:
+        window.close()
+
+# --- 커스텀 노드의 선택형 입력 ---------------------------------------------
+
+CUSTOM_CLASS = "MyCustomUpscale"
+CUSTOM_KEY = f"{CUSTOM_CLASS}_preset"
+CUSTOM_OPTIONS = ["fast", "quality", "ultra"]
+
+
+def _custom_node_workflow() -> dict:
+    """표(_MODEL_FOLDERS)에 없는 선택형 입력을 가진 커스텀 노드."""
+    prompt = _unet_workflow("qwen.safetensors")
+    prompt["90"] = {"class_type": CUSTOM_CLASS,
+                    "inputs": {"preset": "quality", "scale": 2}}
+    return prompt
+
+
+def _custom_kinds() -> dict:
+    """ComfyUI 가 알려 주는 그 노드의 입력 정의."""
+    return {CUSTOM_CLASS: {"preset": "COMBO", "scale": "INT"}}
+
+
+def _show_custom(window, prompt):
+    """메모리 워크플로를 고르고, 엔진 목록에도 올려 둔다."""
+    _show(window, prompt)
+    window.engine.workflows = [window.engine.active_workflow]
+    return window.engine.active_workflow
+
+
+def test_custom_combo_input_gets_a_row_after_the_server_answers(qapp, tmp_path):
+    """커스텀 노드의 선택형 입력에도 드롭다운 칸이 생긴다.
+
+    회귀: 표에 없는 입력은 아예 칸이 없어 값을 바꿀 수 없었다.
+    (돌아가는 것은 되지만 고칠 방법이 없었다)
+    """
+    from app.comfy.workflow import infer_extra_choices
+
+    window = _family_window(qapp, tmp_path)
+    try:
+        prompt = _custom_node_workflow()
+        wf = _show_custom(window, prompt)
+        assert CUSTOM_KEY not in window.model_combos, (
+            "서버 조회를 받기 전에 칸을 만들면 추측이다"
+        )
+
+        # 백그라운드 조회가 끝나 GUI 에 반영되는 순간을 흉내낸다
+        extra = {"메모리": infer_extra_choices(
+            prompt, _custom_kinds(), wf.parameters,
+        )}
+        window._on_info_fetched(
+            window.engine.system_info, window._comfy_models,
+            window._comfy_samplers, window._enhancer_status,
+            {f"{CUSTOM_CLASS}.preset": list(CUSTOM_OPTIONS)}, extra,
+        )
+
+        combo = window.model_combos[CUSTOM_KEY]
+        assert [combo.itemText(i) for i in range(combo.count())] == CUSTOM_OPTIONS
+        assert combo.currentText() == "quality", (
+            f"워크플로에 박힌 값으로 시작해야 한다: {combo.currentText()}"
+        )
+    finally:
+        window.close()
+
+
+def test_custom_choice_value_reaches_the_request(qapp, tmp_path):
+    """고른 값이 실제 워크플로의 그 입력에 실린다."""
+    from app.comfy.workflow import infer_extra_choices
+
+    window = _family_window(qapp, tmp_path)
+    try:
+        prompt = _custom_node_workflow()
+        wf = _show_custom(window, prompt)
+        extra = {"메모리": infer_extra_choices(
+            prompt, _custom_kinds(), wf.parameters,
+        )}
+        window._on_info_fetched(
+            window.engine.system_info, window._comfy_models,
+            window._comfy_samplers, window._enhancer_status,
+            {f"{CUSTOM_CLASS}.preset": list(CUSTOM_OPTIONS)}, extra,
+        )
+
+        combo = window.model_combos[CUSTOM_KEY]
+        combo.setCurrentIndex(combo.findText("ultra"))
+        collected = window._collect_extra()
+        assert collected[CUSTOM_KEY] == "ultra"
+
+        payload = wf.apply(collected)
+        assert payload["90"]["inputs"]["preset"] == "ultra"
+        assert wf.prompt["90"]["inputs"]["preset"] == "quality", (
+            "원본 워크플로는 바뀌면 안 된다"
+        )
+    finally:
+        window.close()
+
+
+def test_worker_finds_custom_choices(qapp, tmp_path, monkeypatch):
+    """백그라운드 조회가 커스텀 노드의 선택형 칸을 찾아 선택지도 함께 받는다."""
+    from app.gui.main_window import ComfyInfoWorker
+
+    window = _family_window(qapp, tmp_path)
+    try:
+        _show_custom(window, _custom_node_workflow())
+        monkeypatch.setattr(
+            GeurimGyeolEngine, "node_input_kinds",
+            lambda self, node_class: _custom_kinds().get(node_class, {}),
+        )
+        worker = ComfyInfoWorker(window.engine)
+        extra = worker._extra_choices()
+        assert CUSTOM_KEY in extra["메모리"]
+        options = worker._input_options(extra)
+        assert options[f"{CUSTOM_CLASS}.preset"], "선택지를 못 받았다"
+    finally:
+        window.close()
+
+
+def test_standard_workflow_gains_no_extra_row(qapp, tmp_path):
+    """기본 워크플로에는 새 칸이 생기지 않는다. (표로 충분한 경우)"""
+    window = _family_window(qapp, tmp_path)
+    try:
+        prompt = _unet_workflow("qwen.safetensors")
+        wf = _show_custom(window, prompt)
+        # 기본 노드들의 정의를 다 알고 있다고 가정한다
+        kinds = {
+            "UNETLoader": {"unet_name": "COMBO"},
+            "CLIPLoader": {"clip_name": "COMBO", "type": "COMBO"},
+            "CLIPTextEncode": {"text": "STRING"},
+            "EmptyLatentImage": {"width": "INT", "height": "INT",
+                                 "batch_size": "INT"},
+            "KSampler": {"seed": "INT", "steps": "INT", "cfg": "FLOAT",
+                         "sampler_name": "COMBO", "scheduler": "COMBO",
+                         "denoise": "FLOAT"},
+        }
+        from app.comfy.workflow import infer_extra_choices
+        assert infer_extra_choices(prompt, kinds, wf.parameters) == {}
     finally:
         window.close()

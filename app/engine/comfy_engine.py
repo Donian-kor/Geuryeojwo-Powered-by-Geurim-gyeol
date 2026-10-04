@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..comfy import ComfyClient, ComfyUIConfig, ComfyUIError, SystemInfo
-from ..comfy.client import extract_text_outputs
+from ..comfy.client import extract_text_outputs, node_input_kinds
 from ..comfy.workflow import Workflow, infer_parameters, list_workflows, load_workflow
 from .output.manager import OutputManager, OutputMetadata
 from .session.manager import SessionManager, SessionMetadata
@@ -281,8 +281,8 @@ class GeurimGyeolEngine:
         # /object_info 전체 응답에서 뽑은 노드 종류 집합 (가져오기 창이 쓴다).
         # 응답이 2.4MB 라 파일을 몇 개 열 때마다 다시 받으면 낭비가 크다.
         # 방금 커스텀 노드를 설치했을 수 있으니 시간을 둔다(TTL).
-        self._node_types_cache: set[str] | None = None
-        self._node_types_at: float = 0.0
+        self._object_info_cache: dict | None = None
+        self._object_info_at: float = 0.0
         # CLIP 로더의 type 선택지. (노드 종류마다 목록이 달라 키로 나눠 캐한다)
         self._input_options_cache: dict[str, tuple[float, list[str] | None]] = {}
 
@@ -514,28 +514,36 @@ class GeurimGyeolEngine:
         except Exception:
             return {}
 
+    def _object_info(self) -> dict:
+        """노드 정의 전체. (/object_info)
+
+        노드 종류 이름만 볼 때와 입력 정의를 볼 때 같은 응답을 쓴다.
+        그래서 한 번 받아 캐시하고, 이름·입력 모두 여기서 꺼낸다.
+
+        Returns:
+            dict: {노드 종류: 정의}. 조회 실패면 빈 dict.
+        """
+        if (self._is_fresh(self._object_info_at)
+                and self._object_info_cache is not None):
+            return self._object_info_cache
+        try:
+            info = self._run(self.client.get_object_info())
+        except Exception as exc:
+            self.logger.warning("노드 정의 조회 실패: %s", exc)
+            return {}
+        self._object_info_cache = info if isinstance(info, dict) else {}
+        self._object_info_at = time.monotonic()
+        return self._object_info_cache
+
     def node_types(self) -> set[str]:
         """ComfyUI 가 아는 노드 타입 이름 집합.
 
         워크플로가 설치되지 않은 노드를 쓰는지 확인할 때 쓴다.
 
-        /object_info 응답이 노드 1000종을 넘어 2.4MB 다. 가져오기 창에서
-        파일을 몇 개 열 때마다 다시 받으면 낭비가 크니 잠깐(TTL) 캐한다.
-        방금 커스텀 노드를 설치했을 수 있어 시간만 두고 지킨다.
-
         Returns:
             set[str]: 노드 타입 이름. 조회 실패면 빈 집합(판단 보류).
         """
-        if self._is_fresh(self._node_types_at) and self._node_types_cache is not None:
-            return self._node_types_cache
-        try:
-            info = self._run(self.client.get_object_info())
-        except Exception as exc:
-            self.logger.warning("노드 목록 조회 실패: %s", exc)
-            return set()
-        self._node_types_cache = set(info) if isinstance(info, dict) else set()
-        self._node_types_at = time.monotonic()
-        return self._node_types_cache
+        return set(self._object_info())
 
     def input_options(self, node_class: str, input_name: str) -> list[str]:
         """노드 종류가 받는 선택지 목록. (CLIP 로더의 type 등)
@@ -572,6 +580,21 @@ class GeurimGyeolEngine:
         """
         return self.input_options("CLIPLoader", "type")
 
+    def node_input_kinds(self, node_class: str) -> dict[str, str]:
+        """노드 종류가 받는 입력 이름 -> 종류. (COMBO/INT/FLOAT/STRING …)
+
+        미리 아는 목록(_MODEL_FOLDERS 등)에 없는 커스텀 노드의 선택형
+        입력을 찾아 칸을 만들 때 쓴다. 워크플로에 없는 노드는 빈 dict 다.
+        노드 정의는 통째로 캐시해 두고 여기서 잘라 쓴다.
+
+        Returns:
+            dict[str, str]: {입력 이름: 종류}. 조회 실패면 빈 dict.
+        """
+        node = self._object_info().get(node_class)
+        if not isinstance(node, dict):
+            return {}
+        return node_input_kinds(node)
+
     @staticmethod
     def _is_fresh(stamp: float) -> bool:
         """캐시가 아직 유효한가."""
@@ -580,11 +603,34 @@ class GeurimGyeolEngine:
     # --- 취소 -------------------------------------------------------
 
     def cancel(self) -> None:
-        """생성 중지를 요청한다."""
-        try:
-            self._run(self.client.interrupt())
-        except Exception:
-            pass
+        """생성 중지를 요청한다.
+
+        왜 별도 스레드에서 보내는가:
+        생성 중에는 _run() 이 _loop_lock 을 쥐고 있다. 여기서 _run() 을
+        쓰면 중지 요청이 그 잠금을 기다리다 생성이 끝나버리고, 결과적으로
+        /interrupt 가 한 번도 전송되지 않는다. 이전 버그의 근본 원인이다.
+
+        잠금을 건드리지 않는 전용 스레드를 띄워, 버튼을 누른 즉시
+        ComfyUI 에 신호가 나가게 한다. 여기서는 아무것도 기다리지 않는다.
+        """
+        thread = threading.Thread(
+            target=self._interrupt_blocking,
+            name="comfy-cancel",
+            daemon=True,
+        )
+        thread.start()
+
+    def _interrupt_blocking(self) -> None:
+        """별도 스레드에서 중단을 실제로 전송한다.
+
+        호출자는 (GUI 스레드) 이기 때문에 여기서 시간이 좀 걸려도
+        화면은 멈추지 않는다.
+        """
+        delivered = self.client.interrupt_now()
+        # 실행 중인 것만 멈추므로, 뒤에 줄 선 작업은 계속 돌아간다.
+        # 그것까지 지워야 '중지' 가 완전히 반영된다.
+        self.client.clear_queue_now()
+        self.logger.info("중지 요청을 ComfyUI 에 보냈습니다 (전달=%s)", delivered)
 
     # --- 생성 -------------------------------------------------------
 

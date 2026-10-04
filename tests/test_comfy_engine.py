@@ -8,6 +8,8 @@ import asyncio
 import io
 import json
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -68,6 +70,71 @@ class _FakeResponse:
 
     def json(self):
         return self._payload
+
+
+# --- 중지 경로 (잠금 교착 회귀) ---------------------------------
+# 회귀 근거: 생성 중에는 _run() 이 _loop_lock 을 쥐고 있다. 예전 cancel() 은
+# 그 잠금을 기다렸다가 보내는 방식으로, /interrupt 가 한 번도 전송되지 않았고
+# 중지가 눌려도 멈추지 않았다. 중지 경로가 잠금을 건드리지 않는지 고정한다.
+
+
+class _CancelStub:
+    """중지 전송만 기록하는 ComfyClient 대체."""
+
+    def __init__(self):
+        self.sent = []
+        self.gate = threading.Event()
+
+    def interrupt_now(self, timeout=5.0):
+        self.sent.append(("interrupt", timeout))
+        self.gate.set()
+        return True
+
+    def clear_queue_now(self, timeout=5.0):
+        self.sent.append(("queue", timeout))
+        return True
+
+
+def test_cancel_does_not_wait_for_the_generation_lock(tmp_path):
+    """생성 스레드가 잠금을 쥔 상태에서도 cancel() 은 즉시 반환한다."""
+    stub = _CancelStub()
+    engine = _engine(tmp_path, stub)
+
+    # 실제 생성 스레드가 _loop_lock 을 쥔 상황을 만든다.
+    engine._loop_lock.acquire()
+    try:
+        t0 = time.perf_counter()
+        engine.cancel()
+        elapsed = time.perf_counter() - t0
+    finally:
+        engine._loop_lock.release()
+
+    assert elapsed < 0.5, f"cancel() 이 생성 잠금을 기다렸다 ({elapsed:.2f}초)"
+    # 반환만 확인한다. 실제 전송은 백그라운드 스레드가 맡는다.
+    stub.gate.wait(3.0)
+
+
+def test_cancel_sends_interrupt_and_clears_pending_queue(tmp_path):
+    """실행 중인 작업과 대기 중인 작업을 모두 중단한다."""
+    stub = _CancelStub()
+    engine = _engine(tmp_path, stub)
+
+    engine._interrupt_blocking()
+
+    assert [name for name, _ in stub.sent] == ["interrupt", "queue"]
+
+
+def test_cancel_survives_a_dead_comfyui(tmp_path):
+    """ComfyUI 가 꺼져 있어도 예외를 밖으로 흘리지 않는다."""
+    class _Dead:
+        def interrupt_now(self, timeout=5.0):
+            return False
+
+        def clear_queue_now(self, timeout=5.0):
+            return False
+
+    engine = _engine(tmp_path, _Dead())
+    engine._interrupt_blocking()  # 예외가 없어야 한다
 
 
 @pytest.mark.parametrize("spec,expected", [
@@ -149,7 +216,7 @@ def test_node_types_cache_expires(tmp_path):
     stub = _StubClient()
     engine = _engine(tmp_path, stub)
     engine.node_types()
-    engine._node_types_at = 0.0
+    engine._object_info_at = 0.0
     engine.node_types()
     assert stub.calls["nodes"] == 2
 
@@ -160,8 +227,43 @@ def test_node_types_failure_does_not_poison_cache(tmp_path):
     engine = _engine(tmp_path, stub)
     assert engine.node_types() == {"KSampler", "SaveImage"}
     stub.fail = True
-    engine._node_types_at = 0.0
+    engine._object_info_at = 0.0
     assert engine.node_types() == set()
+
+
+def test_node_input_kinds_reads_combo_and_other_types():
+    """노드 정의에서 입력 종류를 읽는다. (커스텀 노드의 선택형 칸을 찾는 근거)"""
+    from app.comfy.client import node_input_kinds
+
+    node = {"input": {
+        "required": {
+            "preset": ["COMBO", {"options": ["fast", "quality"]}],
+            "scale": ["INT", {"default": 2}],
+        },
+        "optional": {"mode": [["a", "b"], {}]},
+    }}
+    assert node_input_kinds(node) == {
+        "preset": "COMBO", "scale": "INT", "mode": "COMBO",
+    }
+
+
+def test_node_input_kinds_reuses_the_same_object_info(tmp_path):
+    """입력 종류를 볼 때 노드 정의를 다시 받지 않는다. (2.4MB 응답)"""
+    stub = _StubClient(nodes={"MyCustom": {"input": {"required": {
+        "preset": ["COMBO", {"options": ["fast"]}],
+    }}}})
+    engine = _engine(tmp_path, stub)
+    assert engine.node_input_kinds("MyCustom") == {"preset": "COMBO"}
+    engine.node_types()
+    assert stub.calls["nodes"] == 1, "노드 정의를 종류마다 다시 받았다"
+
+
+def test_node_input_kinds_are_empty_for_unknown_or_failed(tmp_path):
+    """없는 노드·조회 실패는 빈 dict 다. (칸을 추측해서 만들지 않는다)"""
+    engine = _engine(tmp_path, _StubClient())
+    assert engine.node_input_kinds("없는노드") == {}
+    engine = _engine(tmp_path, _StubClient(fail=True))
+    assert engine.node_input_kinds("KSampler") == {}
 
 
 def _png_bytes(size=(64, 64), color=(200, 30, 30)) -> bytes:

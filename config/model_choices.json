@@ -7,7 +7,11 @@
     "unet": "krea2_turbo_nvfp4.safetensors",
     "clip": "qwen3vl_4b_fp8_scaled.safetensors",
     "clip_type": "krea2",
-    "vae": "qwen_image_2.1_vae_bf16.safetensors",
-    "lora": "krea2_softwatercolor.safetensors"
+    "vae": "wan_2.1_vae.safetensors",
+    "lora": "krea2_turbo_lora_rank_64_bf16.safetensors",
+    "ResolutionSelector_aspect_ratio": "16:9 (Widescreen)",
+    "UNETLoader_weight_dtype": "default",
+    "CLIPLoader_device": "default",
+    "TextGenerate_mtp": "auto"
   }
 }

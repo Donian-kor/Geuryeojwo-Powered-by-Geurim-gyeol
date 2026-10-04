@@ -17,7 +17,8 @@ from app.comfy.model_family import (
     workflow_family,
 )
 from app.comfy.workflow import (
-    collect_extra, installed_models, missing_models, save_profile,
+    collect_extra, infer_extra_choices, installed_models, missing_models,
+    save_profile, _ENUM_KIND,
 )
 from app.engine.comfy_engine import (
     GeurimGyeolEngine, _find_enhancer_node, injection_block_reason,
@@ -95,6 +96,12 @@ def _paint_usage(label: QLabel, text: str, level: UsageLevel) -> None:
     label.setStyleSheet(_LEVEL_QSS[level])
 
 
+# 사용자가 직접 중지해서 실패로 보고된 경우를 알아보는 표식.
+# ComfyClient.run() 이 execution_interrupted 를 받으면 이 문장을 넣고
+# ComfyUIError 로 바꾼다. ('사용자가 실행을 중단했습니다')
+_INTERRUPTED = "사용자가 실행을 중단했습니다"
+
+
 class Worker(QThread):
     progress = Signal(int, str); done = Signal(str, dict); failed = Signal(str, object)
     def __init__(self, engine, req): super().__init__(); self.engine=engine; self.req=req
@@ -117,11 +124,11 @@ class ComfyInfoWorker(QThread):
     그만큼 멈춘다 (ComfyUI 가 꺼져 있으면 연결 실패로 수 초,
     자동 실행 대기라면 launch_wait_seconds 만큼).
 
-    네 가지를 한 번에 모아 emit 하므로 요청이 늘어나지 않는다.
+    여섯 가지를 한 번에 모아 emit 하므로 요청이 늘어나지 않는다.
     """
 
-    # SystemInfo, models, samplers, enhancer_status, input_options
-    fetched = Signal(object, object, object, object, object)
+    # SystemInfo, models, samplers, enhancer_status, input_options, extra
+    fetched = Signal(object, object, object, object, object, object)
 
     def __init__(self, engine, allow_launch: bool = True):
         super().__init__()
@@ -133,23 +140,52 @@ class ComfyInfoWorker(QThread):
         models = self.engine.model_options()
         samplers = self.engine.sampler_options()
         enhancer = self.engine.enhancer_status()
-        options = self._input_options()
-        self.fetched.emit(info, models, samplers, enhancer, options)
+        extra = self._extra_choices()
+        options = self._input_options(extra)
+        self.fetched.emit(info, models, samplers, enhancer, options, extra)
 
-    def _input_options(self) -> dict[str, list[str]]:
-        """워크플로가 쓰는 노드의 열거형 선택지 (CLIP 로더의 type).
+    def _extra_choices(self) -> dict[str, dict]:
+        """표에 없는 선택형 입력의 파라미터. (커스텀 노드용)
 
-        노드 종류마다 목록이 다르므로 종류를 키로 삼는다.
+        워크플로(파일 이름 stem) -> {파라미터 키: ParameterSpec}
+        """
+        extra: dict[str, dict] = {}
+        for wf in self.engine.workflows:
+            # 워크플로가 실제로 쓰는 노드 종류만 조회한다.
+            used = {
+                node.get("class_type")
+                for node in (wf.prompt or {}).values()
+                if isinstance(node, dict) and node.get("class_type")
+            }
+            kinds = {
+                class_type: self.engine.node_input_kinds(class_type)
+                for class_type in sorted(used)
+            }
+            specs = infer_extra_choices(wf.prompt, kinds, wf.parameters)
+            if specs:
+                extra[wf.path.stem] = specs
+        return extra
+
+    def _input_options(self, extra: dict) -> dict[str, list[str]]:
+        """워크플로가 쓰는 선택형 입력의 선택지 목록.
+
+        노드 종류 + 입력 이름마다 목록이 다르므로 둘을 합쳐 키로 삼는다.
         (CLIPLoader 는 30개, DualCLIPLoader 는 12개를 받는다)
         GUI 스레드에서 조회하면 창이 멈추므로 여기서 미리 받아 둔다.
         """
         result: dict[str, list[str]] = {}
+        targets: set[tuple[str, str]] = set()
         for wf in self.engine.workflows:
-            spec = (wf.parameters or {}).get("clip_type")
-            node_class = getattr(spec, "node_class", "")
-            if not node_class or node_class in result:
-                continue
-            result[node_class] = self.engine.input_options(node_class, "type")
+            specs = list((wf.parameters or {}).values())
+            specs += list((extra.get(wf.path.stem) or {}).values())
+            for spec in specs:
+                node_class = getattr(spec, "node_class", "")
+                if node_class and spec.kind == _ENUM_KIND:
+                    targets.add((node_class, spec.input))
+        for node_class, input_name in sorted(targets):
+            result[f"{node_class}.{input_name}"] = self.engine.input_options(
+                node_class, input_name
+            )
         return result
 
 
@@ -411,7 +447,7 @@ class MainWindow(QWidget):
         self.engine.refresh_workflows()
         self._info_worker=None
         self._comfy_models={}; self._comfy_samplers={}
-        # 노드 종류 -> 열거형 선택지 (CLIP 로더의 type 등)
+        # 노드 종류 + 입력 이름 -> 열거형 선택지 (CLIP 로더의 type 등)
         self._comfy_input_options={}
         # 계열 감시 대상 (파라미터 키, ComfyUI 폴더)
         self._family_guards: list[tuple[str, str]] = []
@@ -646,7 +682,8 @@ class MainWindow(QWidget):
         미리 정할 수 없는 목록이므로 워크플로에 맞춰 만든다.
         """
         wanted = [key for key, spec in params.items()
-                  if str(spec.kind).startswith("model:") or spec.kind == "choice"]
+                  if str(spec.kind).startswith("model:")
+                  or spec.kind == _ENUM_KIND]
         # 순서가 흔들리면 화면이 제자리에서 점프하므로 고정한다
         wanted.sort(key=_row_order)
         # 워크플로에 인접어 노드가 없어도 칸은 남긴다.
@@ -1111,7 +1148,8 @@ class MainWindow(QWidget):
         self._info_worker.start()
 
     def _on_info_fetched(
-        self, info, models, samplers, enhancer=None, input_options=None
+        self, info, models, samplers, enhancer=None, input_options=None,
+        extra=None,
     ) -> None:
         """ComfyUI 조회가 끝난 뒤(GUI 스레드) 위젯에 반영한다."""
         if self._closing: return
@@ -1120,6 +1158,8 @@ class MainWindow(QWidget):
         self._comfy_samplers = samplers or {}
         self._enhancer_status = enhancer
         self._comfy_input_options = input_options or {}
+        # 커스텀 노드의 선택형 칸은 서버 조회가 끝나야 알 수 있다.
+        self._merge_extra_params(extra or {})
 
         self.comfy_label.setText(self.engine.status_text())
         self.comfy_label.setStyleSheet(
@@ -1133,6 +1173,21 @@ class MainWindow(QWidget):
         # 새 목록으로 콤보를 다시 채운다 (사용자가 고른 값은 유지된다)
         if self.engine.active_workflow is not None:
             self._on_workflow_changed(preserve_selection=True)
+
+    def _merge_extra_params(self, extra: dict) -> None:
+        """커스텀 노드의 선택형 입력을 워크플로 파라미터에 더한다.
+
+        어떤 입력이 선택형인지는 서버에 물어봐야 알 수 있다. (/object_info)
+        그래서 워크플로를 읽을 때가 아니라 조회가 끝난 뒤에 얹는다.
+        파라미터는 워크플로에서 파생되는 값이라 파일에는 저장되지 않는다.
+        (가져올 때 저장하는 것은 이름·설명·출력 노드뿐이다)
+        """
+        for wf in self.engine.workflows:
+            specs = extra.get(wf.path.stem) or {}
+            if not specs:
+                continue
+            for key, spec in specs.items():
+                wf.parameters.setdefault(key, spec)
 
     def _update_offline_banner(self) -> None:
         """ComfyUI 접속 안내 문구를 갱신한다."""
@@ -1457,10 +1512,12 @@ class MainWindow(QWidget):
                 continue
 
             combo.setEnabled(True)
-            if spec.kind == "choice":
-                # 열거형 입력 (CLIP 로더의 type). 파일 목록이 아니라
-                # '이 노드가 받는 값' 이라 ComfyUI 의 정의를 따른다.
-                items = list(self._comfy_input_options.get(spec.node_class) or [])
+            if spec.kind == _ENUM_KIND:
+                # 열거형 입력 (CLIP 로더의 type, 커스텀 노드의 선택형).
+                # 파일 목록이 아니라 '이 노드가 받는 값' 이라 ComfyUI 의
+                # 정의를 따른다. 같은 노드 종류라도 입력마다 목록이 다르다.
+                options_key = f"{spec.node_class}.{spec.input}"
+                items = list(self._comfy_input_options.get(options_key) or [])
                 current = defaults.get(key) or spec.default
             else:
                 folder = spec.kind.split(":", 1)[1] if ":" in spec.kind else ""
@@ -1928,13 +1985,19 @@ class MainWindow(QWidget):
         self.log.append(message)
 
     def stop(self):
-        """생성을 중지한다."""
+        """생성을 중지한다.
+
+        ComfyUI 는 신호를 노드 경계에서만 보기 때문에, 즉시 멈추지
+        않으면(LLM 프롬프트 정리 등) 시간이 걸릴 수 있다. 그래서
+        버튼을 누른 직후와 실제 종료 시점의 문구를 구분해 보여준다.
+        """
         self.engine.cancel()
-        self.status.setText("중지 요청됨")
+        self.cancel.setEnabled(False)
+        self.status.setText("중지 중...")
 
     def done(self,path,meta):
         if self._closing: return
-        self.generate.setEnabled(True)
+        self.generate.setEnabled(True); self.cancel.setEnabled(True)
         pixmap=QPixmap(path)
         if not pixmap.isNull():
             self.preview.setPixmap(pixmap.scaled(
@@ -1951,7 +2014,13 @@ class MainWindow(QWidget):
         때문이다. 오류 원인은 워크플로/노드/모델 쪽에 있으므로 로그로 남긴다.
         """
         if self._closing: return
-        self.generate.setEnabled(True)
+        self.generate.setEnabled(True); self.cancel.setEnabled(True)
+        # 사용자가 직접 중지한 경우에는 실패가 아니라 정상적인 결과다.
+        # 창을 띄우면 "내가 끊은 건데 왜 오류가 나지" 혼란스러우므로 숨긴다.
+        if _INTERRUPTED in (msg or ""):
+            self.status.setText("중지됨")
+            self.log.append(msg)
+            return
         self.status.setText("실패")
         self.log.append("ERROR: " + msg)
         QMessageBox.critical(self, "생성 실패", msg)

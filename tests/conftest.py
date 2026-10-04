@@ -86,6 +86,33 @@ def no_real_gpu_reader(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def no_real_node_definitions(monkeypatch):
+    """GUI 테스트가 실제 ComfyUI 에 접속하지 않게 한다.
+
+    회귀 근거: 커스텀 노드의 선택형 칸을 찾으려면 노드 정의(/object_info,
+    2.4MB)가 필요하다. 이러지 않으면 창을 만드는 테스트마다 서버 응답을
+    기다려 느려지고, ComfyUI 가 켜져 있는지에 따라 결과가 달라진다.
+
+    노드 정의만 '아무것도 없는 서버' 로 흉내낸다. 서버가 꺼졌을 때와 같은
+    경로라 판단 보류로 넘어간다. (enhancer_status 를 막는 것과 같은 이유다)
+    다른 경로는 전부 실패시키되, 각 조회 메서드가 예외를 받아 처리하는
+    경로여서 테스트 목적에는 지장이 없다.
+    """
+    from app.comfy.client import ComfyClient, ComfyUIError
+
+    class _EmptyResponse:
+        def json(self):
+            return {}
+
+    async def _fake_get(self, path, *args, **kwargs):
+        if str(path).startswith("/object_info"):
+            return _EmptyResponse()
+        raise ComfyUIError(f"테스트에서는 서버를 쓰지 않는다: {path}")
+
+    monkeypatch.setattr(ComfyClient, "_get", _fake_get)
+
+
 @pytest.fixture(scope="session")
 def project_root() -> Path:
     """프로젝트 루트 경로."""

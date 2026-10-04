@@ -672,6 +672,55 @@ def infer_parameters(prompt: dict) -> dict[str, ParameterSpec]:
     return specs
 
 
+def infer_extra_choices(
+    prompt: dict,
+    kinds: dict[str, dict[str, str]],
+    covered: dict | None = None,
+) -> dict[str, ParameterSpec]:
+    """미리 아는 목록에 없는 선택형(COMBO) 입력을 찾아 칸으로 만든다.
+
+    커스텀 노드는 입력 이름이 제각각이라 표로 미리 다 담을 수 없다.
+    ComfyUI 가 노드 정의로 알려 주는 선택형 입력만 골라 칸을 만든다.
+
+    Args:
+        prompt: 워크플로 노드
+        kinds: {노드 종류: {입력 이름: 종류}} — engine.node_input_kinds 결과
+        covered: 이미 만들어진 파라미터. 같은 입력을 두 번 만들지 않게 쓴다.
+
+    Returns:
+        dict[str, ParameterSpec]: 새로 추가할 파라미터
+    """
+    used = {spec.input for spec in (covered or {}).values()}
+    specs: dict[str, ParameterSpec] = {}
+    for node_id, node in (prompt or {}).items():
+        if not isinstance(node, dict):
+            continue
+        class_type = node.get("class_type") or ""
+        inputs = node.get("inputs") or {}
+        for name, kind in (kinds.get(class_type) or {}).items():
+            if kind != "COMBO":
+                continue
+            # 샘플러·모델 로더 입력은 전용 칸이 이미 있다.
+            # (sampler_name 은 Generate 탭, ckpt_name 은 Models 칸)
+            if name in _SAMPLER_INPUTS or name in _MODEL_INPUTS:
+                continue
+            if name in used:
+                continue
+            key = f"{class_type}_{name}"
+            if key in specs or key in (covered or {}):
+                continue
+            # 값이 비었거나 앞 노드와 연결된 입력은 고를 것이 없다.
+            # 빈 칸을 먼저 고르게 두면 값이 없는 자리에 값이 들어가 버린다.
+            value = inputs.get(name)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            specs[key] = ParameterSpec(
+                key, node_id, name, f"{name} ({class_type})", _ENUM_KIND,
+                default=value, node_class=class_type,
+            )
+    return specs
+
+
 def _is_lora_node(node: dict) -> bool:
     """LoRA 를 붙이는 노드인가. (파일 선택 입력이 있는지로 판단한다)
 

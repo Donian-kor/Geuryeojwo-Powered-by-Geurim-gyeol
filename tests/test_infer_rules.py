@@ -457,3 +457,115 @@ def test_negative_value_lands_on_its_own_node():
     assert payload[specs["positive"].node]["inputs"]["text"] == "새 프롬프트"
     # 원본은 바뀌지 않는다
     assert workflow.prompt[negative.node]["inputs"][negative.input] == "Avoid blurry"
+
+# --- 표에 없는 선택형 입력 (커스텀 노드) ---------------------------------
+
+CUSTOM_NODE_CLASS = "MyCustomUpscale"
+CUSTOM_KINDS = {
+    CUSTOM_NODE_CLASS: {"preset": "COMBO", "scale": "INT", "tiling": "BOOLEAN"},
+}
+
+
+def _custom_workflow() -> dict:
+    """표에 없는 선택형 입력을 가진 커스텀 노드가 있는 워크플로."""
+    prompt = _z_anime_workflow()
+    prompt["90"] = {
+        "class_type": CUSTOM_NODE_CLASS,
+        "inputs": {"preset": "fast", "scale": 2, "tiling": True},
+    }
+    return prompt
+
+
+def test_custom_combo_input_becomes_a_choice_spec():
+    """커스텀 노드의 선택형 입력에도 칸을 만든다."""
+    from app.comfy.workflow import _ENUM_KIND, infer_extra_choices
+
+    specs = infer_extra_choices(_custom_workflow(), CUSTOM_KINDS)
+    key = f"{CUSTOM_NODE_CLASS}_preset"
+    assert key in specs, "선택형 입력을 칸으로 만들지 않았다"
+    spec = specs[key]
+    assert spec.kind == _ENUM_KIND
+    assert spec.node == "90"
+    assert spec.input == "preset"
+    assert spec.node_class == CUSTOM_NODE_CLASS
+    assert spec.default == "fast", "워크플로에 박힌 값으로 시작해야 한다"
+
+
+def test_custom_non_combo_inputs_are_left_alone():
+    """숫자·참거짓 입력은 이 단계에서 다루지 않는다. (칸이 늘어난다)"""
+    from app.comfy.workflow import infer_extra_choices
+
+    specs = infer_extra_choices(_custom_workflow(), CUSTOM_KINDS)
+    assert f"{CUSTOM_NODE_CLASS}_scale" not in specs
+    assert f"{CUSTOM_NODE_CLASS}_tiling" not in specs
+
+
+def test_custom_workflow_gains_nothing_when_server_is_silent():
+    """노드 정의를 못 받으면 아무것도 추가하지 않는다. (추측하지 않는다)"""
+    from app.comfy.workflow import infer_extra_choices
+
+    prompt = _custom_workflow()
+    assert infer_extra_choices(prompt, {}) == {}
+    assert infer_extra_choices(prompt, {"없는노드": {"preset": "COMBO"}}) == {}
+
+
+def test_known_inputs_are_not_duplicated():
+    """이미 칸이 있는 입력은 다시 만들지 않는다.
+
+    sampler_name 은 Generate 탭 전용 칸이 있고, ckpt_name 은 Models 칸이
+    있다. 둘 다 다시 만들면 같은 값을 두 곳에서 고르게 된다.
+    """
+    from app.comfy.workflow import infer_extra_choices
+
+    prompt = _z_anime_workflow()
+    prompt["91"] = {
+        "class_type": "MyLoader",
+        "inputs": {"sampler_name": "euler", "scheduler": "normal",
+                   "ckpt_name": "a.safetensors", "mode": "quality"},
+    }
+    kinds = {"MyLoader": {"sampler_name": "COMBO", "scheduler": "COMBO",
+                          "ckpt_name": "COMBO", "mode": "COMBO"}}
+    specs = infer_extra_choices(prompt, kinds, infer_parameters(prompt))
+    assert "MyLoader_mode" in specs
+    for covered in ("sampler_name", "scheduler", "ckpt_name"):
+        assert not any(s.input == covered for s in specs.values()), (
+            f"{covered} 칸을 두 번 만들었다"
+        )
+
+
+def test_custom_input_already_covered_is_skipped():
+    """이미 만들어진 파라미터와 입력 이름이 겹치면 만들지 않는다."""
+    from app.comfy.workflow import ParameterSpec, infer_extra_choices
+
+    prompt = _custom_workflow()
+    covered = infer_parameters(prompt)
+    covered["other"] = ParameterSpec("other", "90", "preset", None, "choice")
+    specs = infer_extra_choices(prompt, CUSTOM_KINDS, covered)
+    assert f"{CUSTOM_NODE_CLASS}_preset" not in specs
+
+
+def test_linked_or_empty_custom_value_is_skipped():
+    """값이 비었거나 앞 노드와 연결된 입력은 칸을 만들지 않는다.
+
+    빈 칸을 먼저 고르게 두면 값이 없던 자리에 값이 들어가 버린다.
+    """
+    from app.comfy.workflow import infer_extra_choices
+
+    prompt = _custom_workflow()
+    prompt["90"]["inputs"] = {"preset": "", "scale": ["12", 0]}
+    specs = infer_extra_choices(prompt, CUSTOM_KINDS)
+    assert specs == {}
+
+
+def test_same_class_twice_makes_one_row():
+    """같은 노드 종류가 여럿이어도 같은 입력은 한 칸만 만든다."""
+    from app.comfy.workflow import infer_extra_choices
+
+    prompt = _custom_workflow()
+    prompt["91"] = {"class_type": CUSTOM_NODE_CLASS,
+                    "inputs": {"preset": "quality", "scale": 4}}
+    specs = infer_extra_choices(prompt, CUSTOM_KINDS)
+    assert list(specs) == [f"{CUSTOM_NODE_CLASS}_preset"]
+    assert specs[f"{CUSTOM_NODE_CLASS}_preset"].default == "fast", (
+        "실제로 쓰이는 쪽의 값을 기본값으로 삼아야 한다"
+    )

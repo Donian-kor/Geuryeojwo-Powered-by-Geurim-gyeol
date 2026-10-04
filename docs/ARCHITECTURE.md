@@ -119,7 +119,7 @@ python main.py --api --port 8188
 | GET | `/system_stats` | VRAM · 장치 정보 |
 | GET | `/models` | 모델 폴더 목록 |
 | GET | `/models/{folder}` | 폴더별 모델 목록 |
-| GET | `/object_info[/{node}]` | sampler · scheduler 선택지 |
+| GET | `/object_info[/{node}]` | sampler · scheduler 선택지, 커스텀 노드의 선택형 입력 |
 | GET | `/queue` | 대기열 — **호출자 없음** |
 | POST | `/prompt` | 워크플로 제출 |
 | WS | `/ws?clientId=` | 진행률 수신 |
@@ -205,6 +205,23 @@ WebSocket 연결 → POST /prompt → prompt_id 확보 → 이벤트 수신
 프롬프트 인핸서 노드는 `class_type` 에 `TextEncode` 가 없어도
 프롬프트를 실제로 받으므로 후보가 된다. 인핸서와 KSampler 가 모두
 `seed` 를 가질 때는 KSampler 쪽만 선택된다.
+
+### 6.2-1 표에 없는 선택형 입력 (`infer_extra_choices`)
+
+위 표는 입력 이름을 미리 아는 정해진 목록이다. 커스텀 노드는 입력 이름이
+제각각이라 표로 다 담을 수 없다. 그래서 서버 조회가 끝난 뒤
+`/object_info` 로 노드 정의를 받아 **선택형(COMBO) 입력만** 추가로 칸을
+ 만든다.
+
+| 조건 | 결과 |
+|---|---|
+| 입력 종류가 `COMBO` | 칸을 만든다 (선택지는 `input_options` 로 다시 물어본다) |
+| `INT` `FLOAT` `STRING` `BOOLEAN` | 만들지 않는다 |
+| `sampler_name` `scheduler` `ckpt_name` 등 이미 있는 칸 | 만들지 않는다 |
+| 값이 비었거나 앞 노드와 연결된 입력 | 만들지 않는다 (빈 값 자리를 추측으로 채우지 않는다) |
+| 같은 노드 종류가 여럿 | 같은 입력은 한 칸만 만든다 |
+
+칸은 워크플로 파라미터에 나중에 얹히므로 워크플로 JSON 에는 저장되지 않는다.
 
 ### 6.3 값 주입 규칙
 
