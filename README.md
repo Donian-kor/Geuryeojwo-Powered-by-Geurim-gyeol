@@ -1,4 +1,4 @@
-# Geuryeojwo v0.2
+# Geuryeojwo v0.7.0
 
 **Local AI Image Studio — Powered by Geurim-gyeol**
 
@@ -137,16 +137,25 @@ app/
 ├── comfy/            ComfyUI API 클라이언트와 워크플로 로더
 │   ├── client.py     HTTP/WebSocket 통신
 │   ├── config.py     접속 설정
+│   ├── check.py      설치된 모델 확인 안내
+│   ├── model_family.py  모델 계열 판별
 │   └── workflow.py   워크플로 파싱 · 값 주입 · 파라미터 자동 인식
 ├── engine/
 │   ├── comfy_engine.py   엔진 (GUI 가 호출하는 동기 façade)
+│   ├── health.py        CPU/GPU/RAM/VRAM 사용량 판정
 │   ├── output/           출력 이미지 + JSON 저장
 │   └── session/          생성 이력 기록
 └── gui/               PySide6 화면
+    ├── main_window.py   메인 창 (탭 3개)
+    ├── gpu_usage.py     nvidia-smi 읽기
+    ├── import_dialog.py 워크플로 가져오기
+    ├── session_browser.py  기록 브라우저
+    └── theme/           테마 관리
 
 workflows/         워크플로 JSON
 outputs/           생성된 이미지 (날짜별 폴더)
 sessions/          생성 이력
+logs/              실행 로그
 config/            comfyui.json, theme_config.json
 ```
 
@@ -156,6 +165,10 @@ config/            comfyui.json, theme_config.json
 |---|---|
 | `config/comfyui.json` | ComfyUI 접속 주소와 타임아웃 |
 | `config/theme_config.json` | 다크/라이트 테마 |
+
+`config/comfyui.json` 의 `models_dir` 은 ComfyUI 의 `models` 폴더
+경로입니다. 비어 있으면 프로그램이 흔한 위치 몇 곳을 먼저 찾아보고,
+못 찾으면 설치된 PC 에 한 번만 직접 물어봅니다.
 
 ## 테스트
 
@@ -177,6 +190,6 @@ pip install -r requirements.txt
 
 `torch`, `diffusers`, `transformers`, `llama-cpp-python` 은 필요 없습니다.
 
-## v0.7 Architecture
+## 구조 문서
 
-The GUI is being migrated toward feature-based modules under `app/gui/pages/`, reusable components under `app/gui/widgets/`, controllers under `app/gui/controllers/`, and background workers under `app/gui/workers/`. ComfyUI integration is isolated under `app/engine/comfy/`.
+더 자세한 설계는 `docs/ARCHITECTURE.md` 를 보세요.

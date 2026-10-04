@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 import sys, logging, atexit
 from pathlib import Path
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
@@ -54,6 +55,13 @@ _ENHANCER_FOLDER = "LLM"
 
 # 이 계열에 맞는 설치 모델이 하나도 없을 때 칸 맨 위에 놓이는 항목.
 _NO_MODEL = "(이 계열 모델 없음 — 선택하세요)"
+
+# 고를 수 없는 값(설치 안 됨 / 다른 계열)의 글자색.
+# Qt 는 목록의 항목 색과 콤보가 접힌 상태의 글자를 따로 그린다. 그래서
+# 목록은 항목 색으로, 접힌 상태는 아래 QSS 로 같은 색을 써야 두 화면이
+# 어긋나지 않는다. (드롭다운을 펼치지 않아도 빨간색이 보여야 한다)
+_BAD_COLOR = "#ff6b6b"
+_BAD_QSS = f"QComboBox {{ color:{_BAD_COLOR}; }}"
 
 
 def _row_order(key: str) -> tuple[float, int]:
@@ -396,6 +404,8 @@ class MainWindow(QWidget):
         self.engine=GeurimGyeolEngine(ROOT); self.worker=None
         # 창이 닫힌 뒤 도착한 워커 시그널은 버린다
         self._closing=False
+        self._model_choices_path = ROOT / "config" / "model_choices.json"
+        self._model_choices = self._load_model_choices()
         # ComfyUI 조회는 네트워크 I/O 라 GUI 스레드에서 하지 않는다.
         # 워크플로 목록만(디스크) 먼저 읽고, 서버 조회는 워커로 넘긴다.
         self.engine.refresh_workflows()
@@ -563,6 +573,13 @@ class MainWindow(QWidget):
         )
         self.import_btn.clicked.connect(self._on_import_workflow)
         wf_layout.addWidget(self.import_btn)
+        self.delete_btn=QPushButton("삭제")
+        self.delete_btn.setToolTip(
+            "목록에서 고른 워크플로를 workflows/ 에서 지웁니다.\n"
+            "기본 워크플로는 지울 수 없습니다."
+        )
+        self.delete_btn.clicked.connect(self._on_delete_workflow)
+        wf_layout.addWidget(self.delete_btn)
         body.addWidget(wfbox, 1)
 
         # 모델 선택 — ComfyUI 의 폴더별 목록에서 고른다 (v0.2 §5.3)
@@ -670,6 +687,14 @@ class MainWindow(QWidget):
             combo.currentIndexChanged.connect(
                 lambda _i, k=key: self._update_model_warning(k)
             )
+            combo.currentIndexChanged.connect(
+                lambda _i, k=key: self._on_model_choice_changed(k)
+            )
+            # 고른 값이 바뀌면 접힌 상태의 글자색도 다시 맞춰야 한다.
+            # (설치된 모델로 바꾸면 빨간색이 사라져야 한다)
+            combo.currentIndexChanged.connect(
+                lambda _i, k=key: self._refresh_combo_state(k)
+            )
             self.model_combos[key] = combo
             self._model_labels[key] = caption
             grid.addWidget(label, row, 0)
@@ -731,6 +756,45 @@ class MainWindow(QWidget):
         self.engine.active_workflow = saved
         self._reload_workflows()
         self.status.setText(f"'{name}' 등록했습니다.")
+
+    def _on_delete_workflow(self) -> None:
+        """목록에서 고른 워크플로를 지운다."""
+        row = self.workflow_list.currentRow()
+        if row < 0:
+            row = self.workflow.currentIndex()
+        if row < 0:
+            self.status.setText("삭제할 워크플로를 먼저 고르세요.")
+            return
+        stem = self.workflow.itemData(row)
+        workflow = next(
+            (wf for wf in self.engine.workflows if wf.path.stem == stem),
+            None,
+        )
+        if workflow is None:
+            self.status.setText("삭제할 워크플로를 찾을 수 없습니다.")
+            return
+        if workflow.path.parent == self.engine.workflow_dir / "base":
+            self.status.setText("기본 워크플로는 지울 수 없습니다.")
+            return
+        answer = QMessageBox.question(
+            self,
+            "워크플로 삭제",
+            f"'{workflow.name}' 을(를) 삭제할까요?\n\n{workflow.path}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            workflow.path.unlink()
+        except OSError as exc:
+            self.status.setText(f"삭제 실패: {exc}")
+            return
+        self._model_choices.pop(workflow.path.stem, None)
+        self._save_model_choices()
+        self.engine.refresh_workflows()
+        self._reload_workflows()
+        self.status.setText(f"'{workflow.name}' 삭제했습니다.")
 
     def _build_generate_tab(self) -> QWidget:
         """Generate 탭 (v0.2).
@@ -1297,6 +1361,12 @@ class MainWindow(QWidget):
                 f"{name} 은(는) {family_label(model_family)} 계열이라 "
                 "함께 쓸 수 없습니다."
             )
+            # 다른 계열도 '고를 수 없는 값' 이므로 목록에서 빨간색으로 둔다.
+            combo.setItemData(index, QBrush(QColor(_BAD_COLOR)), Qt.ForegroundRole)
+            # 다른 계열 값을 고른 상태로 남아 있을 수 있다. (저장된 선택,
+            # 워크플로 기본값) 닫힌 화면에서도 빨간색이어야 사용자가 안다.
+            if index == combo.currentIndex():
+                combo.setStyleSheet(_BAD_QSS)
 
     def _active_family(self) -> str:
         """현재 워크플로의 계열. 모르면 빈 문자열.
@@ -1359,6 +1429,10 @@ class MainWindow(QWidget):
             {key: combo.currentText() for key, combo in self.model_combos.items()}
             if preserve_selection else {}
         )
+        workflow_stem = (
+            self.engine.active_workflow.path.stem
+            if self.engine.active_workflow is not None else ""
+        )
         self._family_guards: list[tuple[str, str]] = []
         # 칸을 먼저 만든다. 워크플로마다 쓰는 칸이 다르다. (B19)
         self._rebuild_model_rows(params)
@@ -1369,6 +1443,9 @@ class MainWindow(QWidget):
             if key == _ENHANCER_KEY and spec is None:
                 # 워크플로에 인접어 노드가 없다. 생성 시 끼워 넣을 값이므로
                 # 워크플로 기본값 대신 설치된 GGUF 목록을 보여준다.
+                saved_enhancer = self._model_choices.get(workflow_stem, {}).get(key)
+                if saved_enhancer:
+                    self._enhancer_choice = saved_enhancer
                 self._fill_enhancer_combo(combo)
                 combo.blockSignals(False)
                 continue
@@ -1398,6 +1475,9 @@ class MainWindow(QWidget):
                     if not current:
                         current = self._auto_pick_model(folder, items)
                         _no_fit = bool(items) and not current
+            saved_choice = self._model_choices.get(workflow_stem, {}).get(key)
+            if saved_choice:
+                current = saved_choice
             if not items:
                 # ComfyUI 응답이 없으면 워크플로 기본값만
                 items = [current] if current else []
@@ -1427,12 +1507,59 @@ class MainWindow(QWidget):
                 index = combo.findText(keep)
                 if index >= 0:
                     combo.setCurrentIndex(index)
+            if saved_choice:
+                index = combo.findText(saved_choice)
+                if index >= 0:
+                    combo.setCurrentIndex(index)
             combo.blockSignals(False)
         self._paint_missing_models()
         # 계열 표시는 마지막에 한다. _paint_missing_models 도 항목의
         # 툴팁을 다시 쓰기 때문에 먼저 하면 이유가 사라진다.
         for key, folder in self._family_guards:
             self._apply_family_guard(self.model_combos[key], folder)
+
+    def _load_model_choices(self) -> dict[str, dict[str, str]]:
+        """워크플로별로 저장된 모델 선택을 읽는다."""
+        try:
+            data = json.loads(self._model_choices_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {
+            str(workflow): {str(key): str(value) for key, value in choices.items()}
+            for workflow, choices in data.items()
+            if isinstance(choices, dict)
+        }
+
+    def _save_model_choices(self) -> None:
+        """워크플로별 모델 선택을 config/model_choices.json 에 저장한다."""
+        try:
+            self._model_choices_path.parent.mkdir(parents=True, exist_ok=True)
+            self._model_choices_path.write_text(
+                json.dumps(self._model_choices, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+    def _remember_model_choices(self) -> None:
+        """현재 워크플로의 모델 선택을 저장한다."""
+        workflow = self.engine.active_workflow
+        if workflow is None:
+            return
+        self._model_choices[workflow.path.stem] = self._model_selections()
+        self._save_model_choices()
+
+    def _on_model_choice_changed(self, key: str) -> None:
+        """모델 콤보가 바뀌면 워크플로별 선택을 저장한다."""
+        if self._closing:
+            return
+        if key == _ENHANCER_KEY:
+            combo = self.model_combos.get(key)
+            if combo is not None:
+                self._enhancer_choice = combo.currentText()
+        self._remember_model_choices()
 
     def _active_params(self) -> dict:
         """활성 워크플로의 parameters 맵."""
@@ -1449,28 +1576,70 @@ class MainWindow(QWidget):
 
     def _installed_models(self, key: str) -> list[str]:
         """이 모델 키가 쓰는 ComfyUI 폴더의 설치된 파일 목록."""
+        if key == _ENHANCER_KEY:
+            # 인접서 GGUF 는 워크플로 parameters 에 없어 폴더를 못 찾는다.
+            return list(self._comfy_models.get(_ENHANCER_FOLDER) or [])
         return installed_models(self._model_options, self._active_params(), key)
+
+    def _guard_folder(self, key: str) -> str:
+        """계열 감시 대상인 키의 ComfyUI 폴더. 아니면 빈 문자열."""
+        for guard_key, folder in self._family_guards:
+            if guard_key == key:
+                return folder
+        return ""
+
+    def _value_is_bad(self, key: str, text: str) -> bool:
+        """고른 값을 빨간색으로 보여야 하는 상태인가.
+
+        드롭다운을 펼치지 않아도 문제가 보이도록 접힌 상태의 글자도
+        빨갛게 칠한다. 그래서 '왜 빨간가' 를 한 곳에서 판단한다.
+        빨간색이 필요한 경우는 두 가지다.
+        (1) ComfyUI 목록에 없는 파일
+        (2) 이 워크플로와 다른 계열의 모델
+        계열을 모르면 아무것도 막지 않는다. (추측해서 막으면 못 쓰게 된다)
+        """
+        if not text or text.startswith("("):
+            return False
+        installed = self._installed_models(key)
+        if installed and text not in installed:
+            return True
+        family = self._active_family()
+        folder = self._guard_folder(key)
+        if not family or not folder:
+            return False
+        model_family = detect_file_family(Path(self._models_dir()) / folder / text)
+        return not is_compatible(family, model_family)
+
+    def _refresh_combo_state(self, key: str) -> None:
+        """콤보 하나의 상태를 현재 고른 값에 맞춰 다시 맞춘다."""
+        combo = self.model_combos.get(key)
+        if combo is None or not combo.isEnabled():
+            return
+        combo.setStyleSheet(
+            _BAD_QSS if self._value_is_bad(key, combo.currentText()) else ""
+        )
 
     def _paint_missing_models(self) -> None:
         """설치되지 않은 모델 항목을 빨간색과 툴팁으로 표시한다."""
         for key, combo in self.model_combos.items():
             if not combo.isEnabled():
                 continue
+            # ComfyUI 목록을 못 받은 상태면 '설치 안 됨' 을 판정할 수 없다
             installed = self._installed_models(key)
-            if not installed:
-                # ComfyUI 목록을 못 받은 상태라 판정할 수 없다
-                continue
-            for i in range(combo.count()):
-                text = combo.itemText(i)
-                if text in installed:
-                    combo.setItemData(i, QBrush(QColor("#c9d1d9")), Qt.ForegroundRole)
-                    combo.setItemData(i, "", Qt.ToolTipRole)
-                else:
-                    combo.setItemData(i, QBrush(QColor("#ff6b6b")), Qt.ForegroundRole)
-                    combo.setItemData(
-                        i, f"{text} — ComfyUI 에 설치되어 있지 않습니다",
-                        Qt.ToolTipRole,
-                    )
+            if installed:
+                for i in range(combo.count()):
+                    text = combo.itemText(i)
+                    if text in installed:
+                        combo.setItemData(i, QBrush(QColor("#c9d1d9")), Qt.ForegroundRole)
+                        combo.setItemData(i, "", Qt.ToolTipRole)
+                    else:
+                        combo.setItemData(i, QBrush(QColor(_BAD_COLOR)), Qt.ForegroundRole)
+                        combo.setItemData(
+                            i, f"{text} — ComfyUI 에 설치되어 있지 않습니다",
+                            Qt.ToolTipRole,
+                        )
+            # 목록뿐 아니라 접힌 상태의 현재 값도 같이 칠한다.
+            self._refresh_combo_state(key)
         self._update_model_warning()
 
     def _missing_models(self) -> list[tuple[str, str]]:

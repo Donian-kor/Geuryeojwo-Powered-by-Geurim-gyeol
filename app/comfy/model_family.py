@@ -28,6 +28,7 @@ FAMILY_LABELS = {
     "ernie": "ERNIE",
     "sdxl": "SDXL",
     "sd": "SD 1.5",
+    "krea2": "Krea2",
 }
 # 모르는 구조. 아무것도 막지 않는다.
 FAMILY_UNKNOWN = ""
@@ -160,6 +161,14 @@ def _classify(keys: list[str]) -> str:
     # ERNIE — 내장 민스트럴 텍스트 인코더
     if has("text_encoders.ministral") or has("text_encoders.tekken_model"):
         return "ernie"
+    # Krea2 — Qwen3-VL 텍스트 퓨전 어댑터(txtfusion). ComfyUI 도
+    # 같은 키로 판별한다 (model_detection.py 의
+    # '{prefix}txtfusion.projector.weight'). txtfusion 은 이 모델에만
+    # 있다. 파일마다 접두사가 다르다 (model.diffusion_model. / model. /
+    # 없음) 라서 세 형태를 모두 본다.
+    if has("txtfusion") or has("model.txtfusion") \
+            or has("model.diffusion_model.txtfusion"):
+        return "krea2"
     # SDXL — 텍스트 인코더가 두 개다
     if has("conditioner.embedders.0") and has("conditioner.embedders.1"):
         return "sdxl"

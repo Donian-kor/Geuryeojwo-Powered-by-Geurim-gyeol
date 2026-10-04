@@ -34,8 +34,20 @@ ZIMAGE_KEYS = ["model.diffusion_model.cap_embedder.weight",
                "model.diffusion_model.x_embedder.weight",
                "text_encoders.qwen3_4b.layers.0.weight"]
 ERNIE_KEYS = ["model.diffusion_model.adaLN_modulation.weight",
-              "model.diffusion_model.final_linear.weight",
-              "text_encoders.ministral3_3b.layers.0.weight"]
+               "model.diffusion_model.final_linear.weight",
+               "text_encoders.ministral3_3b.layers.0.weight"]
+# ComfyUI model_detection.py 가 Krea2 를 판별하는 키
+# ('{prefix}txtfusion.projector.weight'). txtfusion 은
+# Krea2 의 Qwen3-VL 텍스트 퓨전 어댑터뿐이다.
+# 접두사는 파일마다 다르다 (model.diffusion_model. / model. / 없음).
+KREA2_KEYS = ["txtfusion.projector.weight",
+              "txtfusion.layerwise_blocks.0.attn.wq.weight",
+              "txtfusion.refiner_blocks.0.attn.wq.weight",
+              "blocks.0.attn.wq.weight",
+              "first.weight", "last.linear.weight"]
+KREA2_PREFIXED_KEYS = ["model.diffusion_model.txtfusion.projector.weight",
+                       "model.diffusion_model.blocks.0.attn.wq.weight",
+                       "model.diffusion_model.first.weight"]
 
 
 def _safetensors(path: Path, keys, metadata: dict | None = None) -> Path:
@@ -64,6 +76,8 @@ def test_families_are_told_apart_by_tensor_structure(tmp_path):
         "base.safetensors": (SD_KEYS, "sd"),
         "zimage.safetensors": (ZIMAGE_KEYS, "zimage"),
         "ernie.safetensors": (ERNIE_KEYS, "ernie"),
+        "krea2.safetensors": (KREA2_KEYS, "krea2"),
+        "krea2-prefixed.safetensors": (KREA2_PREFIXED_KEYS, "krea2"),
     }
     for name, (keys, expected) in cases.items():
         path = _safetensors(root / "checkpoints" / name, keys)

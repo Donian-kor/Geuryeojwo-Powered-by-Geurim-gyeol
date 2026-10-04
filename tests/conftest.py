@@ -19,6 +19,34 @@ if str(ROOT) not in sys.path:
 
 
 @pytest.fixture(autouse=True)
+def isolated_root(tmp_path, monkeypatch):
+    """GUI 테스트가 실제 config/ 를 읽고 쓰게 하지 않는다.
+
+    회귀 근거: MainWindow 는 ROOT 로부터 config/ 와 workflows/ 를 읽는다.
+    모델 선택은 config/model_choices.json 에 저장되므로, ROOT 가 실제
+    프로젝트 루트면 테스트가 사용자의 모델 선택을 지운다. (테스트용
+    워크플로 이름이 그대로 저장되어 실제로도 지워진다)
+    설정 파일과 워크플로를 복사해 두면 테스트는 실제와 같은 화면을 보면서
+    쓰기는 tmp 로만 한다.
+    """
+    import shutil
+
+    import app.gui.main_window as mw
+
+    root = tmp_path / "gui_root"
+    (root / "config").mkdir(parents=True, exist_ok=True)
+    for name in ("comfyui.json", "theme_config.json"):
+        source = ROOT / "config" / name
+        if source.exists():
+            (root / "config" / name).write_text(
+                source.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+    shutil.copytree(ROOT / "workflows", root / "workflows", dirs_exist_ok=True)
+    monkeypatch.setattr(mw, "ROOT", root)
+    return root
+
+
+@pytest.fixture(autouse=True)
 def no_real_gpu_reader(monkeypatch):
     """GUI 테스트가 실제 nvidia-smi 를 띄우지 않게 한다.
 

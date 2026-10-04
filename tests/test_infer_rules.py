@@ -83,6 +83,41 @@ def _enhancer_workflow() -> dict:
         "5": {"class_type": "EmptyLatentImage",
               "inputs": {"width": 704, "height": 1024, "batch_size": 1}},
     }
+
+
+def _primitive_prompt_workflow() -> dict:
+    """Krea2 구조: 프롬프트가 PrimitiveStringMultiline 에서 링크로 온다."""
+    return {
+        "1": {"class_type": "CLIPTextEncode",
+              "inputs": {"text": ["2", 0], "clip": ["4", 0]}},
+        "2": {"class_type": "ComfySwitchNode",
+              "inputs": {"switch": ["5", 0],
+                         "on_false": ["3", 0],
+                         "on_true": ["6", 0]}},
+        "3": {"class_type": "PrimitiveStringMultiline",
+              "inputs": {"value": "사용자 프롬프트"}},
+        "4": {"class_type": "CLIPLoader",
+              "inputs": {"clip_name": "c.safetensors"}},
+        "5": {"class_type": "PrimitiveBoolean",
+              "inputs": {"value": True}},
+        "6": {"class_type": "TextGenerate",
+              "inputs": {"prompt": ["7", 0]}},
+        "7": {"class_type": "StringConcatenate",
+              "inputs": {"string_a": ["8", 0], "string_b": ["3", 0]}},
+        "8": {"class_type": "PrimitiveStringMultiline",
+              "inputs": {"value": "시스템 프롬프트"}},
+        "9": {"class_type": "KSampler",
+              "inputs": {"seed": 1, "steps": 8, "cfg": 1,
+                         "sampler_name": "euler", "scheduler": "simple",
+                         "denoise": 1, "model": ["10", 0],
+                         "positive": ["1", 0], "latent_image": ["11", 0]}},
+        "10": {"class_type": "UNETLoader",
+               "inputs": {"unet_name": "u.safetensors"}},
+        "11": {"class_type": "EmptyLatentImage",
+               "inputs": {"width": 1024, "height": 1024, "batch_size": 1}},
+    }
+
+
 # --- 1. positive / negative 구분 ---------------------------------------
 
 def test_negative_only_node_is_never_positive():
@@ -117,6 +152,27 @@ def test_same_node_on_both_slots_still_yields_prompt():
     assert specs["positive"].node == "14"
     assert specs["positive"].input == "prompt"
     assert specs["seed"].node == "6"
+
+
+def test_linked_primitive_prompt_becomes_positive_parameter():
+    """프롬프트가 링크로 연결된 상수 노드도 조작 대상이다."""
+    specs = infer_parameters(_primitive_prompt_workflow())
+    assert specs["positive"].node == "3"
+    assert specs["positive"].input == "value"
+
+
+def test_linked_primitive_prompt_default_is_read():
+    """링크된 상수 노드의 값이 기본값으로 읽힌다."""
+    defaults = _load(_primitive_prompt_workflow()).defaults()
+    assert defaults["positive"] == "사용자 프롬프트"
+
+
+def test_linked_primitive_prompt_receives_app_input():
+    """앱 프롬프트가 링크된 상수 노드 값으로 주입된다."""
+    workflow = _load(_primitive_prompt_workflow())
+    payload = workflow.apply({"positive": "새 프롬프트"})
+    assert payload["3"]["inputs"]["value"] == "새 프롬프트"
+    assert payload["1"]["inputs"]["text"] == ["2", 0]
 
 
 # --- 2. 링크된 상수 해석 ------------------------------------------------

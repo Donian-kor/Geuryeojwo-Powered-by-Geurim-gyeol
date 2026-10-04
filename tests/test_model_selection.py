@@ -93,15 +93,18 @@ def make_window(qapp, tmp_path, monkeypatch, project_root):
         import app.gui.main_window as mw
 
         base = json.loads(
-            (project_root / "workflows" / "qwen-image-2.1-baseline.json")
+            (project_root / "workflows" / "base" / "qwen-image.json")
             .read_text(encoding="utf-8")
         )
-        prompt = json.loads(json.dumps(base))
+        prompt = base.get("prompt", base)
+        prompt = json.loads(json.dumps(prompt))
         prompt["1"]["inputs"]["unet_name"] = unet
         # 나머지는 모두 설치된 것으로 맞춘다 (unet 만 판정 대상)
         prompt["2"]["inputs"]["clip_name"] = FAKE_OPTIONS["text_encoders"][0]
         prompt["3"]["inputs"]["vae_name"] = FAKE_OPTIONS["vae"][0]
-        prompt["16"]["inputs"]["lora_name"] = FAKE_OPTIONS["loras"][0]
+        for node_id, node in prompt.items():
+            if "lora_name" in node.get("inputs", {}):
+                node["inputs"]["lora_name"] = FAKE_OPTIONS["loras"][0]
 
         root = tmp_path / "root"
         for name in ("config", "workflows", "outputs", "sessions"):
@@ -1012,5 +1015,216 @@ def test_unknown_workflow_family_blocks_nothing(qapp, tmp_path):
         for name in ("qwen.safetensors", "xl.safetensors"):
             item = combo.model().item(combo.findText(name))
             assert item.isEnabled(), f"모르는 상태에서 {name} 을 막았다"
+    finally:
+        window.close()
+
+
+# --- 드롭다운을 펼치지 않아도 빨간색으로 보여야 한다 ----------------------
+
+def _closed_is_red(combo) -> bool:
+    """콤보가 접힌 상태의 글자가 빨간색인지.
+
+    항목 색(Qt.ForegroundRole)은 드롭다운을 펼쳤을 때만 보인다. 접힌
+    상태의 글자는 콤보가 따로 그리므로 QSS 로 칠해야 한다.
+    """
+    return RED in combo.styleSheet().lower()
+
+
+def test_missing_model_is_red_in_closed_combo(make_window):
+    """설치 안 된 모델은 드롭다운을 펼치지 않아도 빨간색이어야 한다.
+
+    회귀: 목록 항목 색만 칠해서 닫힌 화면은 멀쩡했다. 사용자는 문제를
+    알아채려면 드롭다운을 눌러 확인해야 했다.
+    """
+    w = make_window(MISSING)
+    try:
+        combo = w.model_combos["unet"]
+        assert combo.currentText() == MISSING
+        assert _closed_is_red(combo), "설치 안 된 값인데 닫힌 화면은 빨갛지 않다"
+    finally:
+        w.close()
+
+
+def test_installed_model_is_not_red_in_closed_combo(make_window):
+    """설치된 모델은 빨간색으로 칠하지 않는다."""
+    w = make_window("installedA.safetensors")
+    try:
+        assert not _closed_is_red(w.model_combos["unet"])
+    finally:
+        w.close()
+
+
+def test_red_clears_when_installed_model_is_picked(make_window):
+    """설치된 모델로 바꾸면 접힌 화면의 빨간색도 사라져야 한다."""
+    w = make_window(MISSING)
+    try:
+        combo = w.model_combos["unet"]
+        assert _closed_is_red(combo)
+        combo.setCurrentIndex(combo.findText("installedA.safetensors"))
+        assert not _closed_is_red(combo), "고쳐졌는데 빨간색이 남아 있다"
+    finally:
+        w.close()
+
+
+def test_other_family_value_is_red_in_closed_combo(qapp, tmp_path):
+    """다른 계열의 값이 남아 있어도 닫힌 화면에서 빨간색이어야 한다."""
+    window = _family_window(qapp, tmp_path)
+    try:
+        _show(window, _unet_workflow("qwen.safetensors"))
+        combo = window.model_combos["unet"]
+        assert not _closed_is_red(combo), "같은 계열인데 빨갛게 표시되었다"
+        # 다른 계열의 값을 고른 상태로 남는다. (저장된 선택, 워크플로 기본값)
+        combo.setCurrentIndex(combo.findText("xl.safetensors"))
+        assert combo.currentText() == "xl.safetensors"
+        assert _closed_is_red(combo), "다른 계열인데 닫힌 화면은 빨갛지 않다"
+    finally:
+        window.close()
+
+
+def test_other_family_item_is_painted_red(qapp, tmp_path):
+    """다른 계열 항목은 목록에서도 빨간색으로 칠한다."""
+    window = _family_window(qapp, tmp_path)
+    try:
+        _show(window, _unet_workflow("xl.safetensors"))
+        combo = window.model_combos["unet"]
+        assert _color(combo, combo.findText("qwen.safetensors")) == RED
+        assert _color(combo, combo.findText("xl.safetensors")) != RED
+    finally:
+        window.close()
+
+
+def test_placeholder_text_is_not_red(qapp, tmp_path):
+    """'(이 계열 모델 없음)' 같은 안내 문구는 빨간색이 아니다."""
+    window = _family_window(qapp, tmp_path)
+    try:
+        _show(window, _unet_workflow("qwen.safetensors"))
+        assert not window._value_is_bad("unet", "(이 계열 모델 없음 — 선택하세요)")
+    finally:
+        window.close()
+
+
+# --- 워크플로별 모델 선택 저장과 삭제 -------------------------------------
+
+def test_model_choice_survives_reopen(make_sd_window):
+    """프로그램을 껐다 켜도 고른 모델이 그대로 선택되어 있어야 한다.
+
+    회귀: 선택이 워크플로 기본값으로 되돌아가면 매번 다시 골라야 한다.
+    """
+    w = make_sd_window("sdA.safetensors")
+    try:
+        combo = w.model_combos["checkpoint"]
+        combo.setCurrentIndex(combo.findText("sdB.safetensors"))
+        assert w._model_choices["S"]["checkpoint"] == "sdB.safetensors"
+        saved = json.loads(
+            w._model_choices_path.read_text(encoding="utf-8")
+        )
+        assert saved == {"S": {"checkpoint": "sdB.safetensors"}}
+    finally:
+        w.close()
+
+    다시 = make_sd_window("sdA.safetensors")
+    try:
+        assert 다시.model_combos["checkpoint"].currentText() == "sdB.safetensors", (
+            "다시 열었을 때 워크플로 기본값으로 돌아갔다"
+        )
+    finally:
+        다시.close()
+
+
+def test_model_choice_file_is_read_back_on_start(qapp, isolated_root, project_root):
+    """저장된 파일이 있으면 워크플로 기본값보다 우선한다."""
+    import app.gui.main_window as mw
+
+    (isolated_root / "workflows").mkdir(parents=True, exist_ok=True)
+    (isolated_root / "workflows" / "S.json").write_text(
+        json.dumps({"name": "SD", "prompt": _sd_prompt()}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (isolated_root / "config" / "model_choices.json").write_text(
+        json.dumps({"S": {"checkpoint": "sdB.safetensors"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    assert mw.ROOT == isolated_root
+    window = _plain_window(qapp)
+    try:
+        index = next(
+            i for i in range(window.workflow.count())
+            if window.workflow.itemData(i) == "S"
+        )
+        window.workflow.setCurrentIndex(index)
+        combo = window.model_combos["checkpoint"]
+        assert combo.currentText() == "sdB.safetensors"
+    finally:
+        window.close()
+
+
+def _delete_root(tmp_path, project_root):
+    """base/ 와 profiles/ 워크플로를 하나씩 둔 루트를 만든다."""
+    import shutil as _shutil
+
+    root = tmp_path / "delroot"
+    for name in ("config", "workflows", "outputs", "sessions"):
+        (root / name).mkdir(parents=True, exist_ok=True)
+    _shutil.copy(project_root / "config" / "comfyui.json",
+                 root / "config" / "comfyui.json")
+    (root / "workflows" / "base").mkdir(parents=True, exist_ok=True)
+    (root / "workflows" / "profiles").mkdir(parents=True, exist_ok=True)
+    (root / "workflows" / "base" / "sd.json").write_text(
+        json.dumps({"name": "SD", "prompt": _sd_prompt()}, ensure_ascii=False),
+        encoding="utf-8")
+    (root / "workflows" / "profiles" / "extra.json").write_text(
+        json.dumps({"name": "Extra", "prompt": _sd_prompt()}, ensure_ascii=False),
+        encoding="utf-8")
+    return root
+
+
+def test_imported_workflow_can_be_deleted(qapp, tmp_path, project_root,
+                                        isolated_root, monkeypatch):
+    """가져온 워크플로는 지울 수 있고, 목록과 저장된 선택도 함께 사라진다."""
+    import app.gui.main_window as mw
+
+    root = _delete_root(tmp_path, project_root)
+    for name in ("config", "workflows", "outputs", "sessions"):
+        (root / name).mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(mw, "ROOT", root)
+
+    window = _plain_window(qapp)
+    try:
+        window.workflow.setCurrentIndex(1)
+        assert window.workflow_list.currentRow() == 1
+        window._model_choices["extra"] = {"checkpoint": "sdB.safetensors"}
+        monkeypatch.setattr(
+            QMessageBox, "question", lambda *a, **k: QMessageBox.Yes
+        )
+        window._on_delete_workflow()
+        assert not (root / "workflows" / "profiles" / "extra.json").exists()
+        assert [wf.path.stem for wf in window.engine.workflows] == ["sd"]
+        assert window.workflow_list.count() == 1
+        assert "extra" not in window._model_choices
+    finally:
+        window.close()
+
+
+def test_base_workflow_cannot_be_deleted(qapp, tmp_path, project_root,
+                                         isolated_root, monkeypatch):
+    """배포된 기본 워크플로는 지울 수 없다."""
+    import app.gui.main_window as mw
+
+    root = _delete_root(tmp_path, project_root)
+    for name in ("config", "workflows", "outputs", "sessions"):
+        (root / name).mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(mw, "ROOT", root)
+
+    window = _plain_window(qapp)
+    try:
+        window.workflow.setCurrentIndex(0)
+        assert window.workflow_list.currentRow() == 0
+        monkeypatch.setattr(
+            QMessageBox, "question",
+            lambda *a, **k: pytest.fail("기본 워크플로에도 삭제를 물었다"),
+        )
+        window._on_delete_workflow()
+        assert (root / "workflows" / "base" / "sd.json").exists()
+        assert "지울 수 없습니다" in window.status.text()
     finally:
         window.close()

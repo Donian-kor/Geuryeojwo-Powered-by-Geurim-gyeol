@@ -20,6 +20,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -452,6 +453,43 @@ _CONSTANT_NODES = frozenset((
 _CONSTANT_INPUTS = ("value", "string", "text")
 
 
+def _nearest_constant_source(
+    prompt: dict, link: list
+) -> tuple[str, str] | None:
+    """링크가 가리키는 그래프에서 가장 가까운 문자열 상수 노드를 찾는다."""
+    if not (isinstance(link, list) and len(link) == 2):
+        return None
+    start = prompt.get(link[0])
+    if not isinstance(start, dict):
+        return None
+    queue: deque[tuple[str, int]] = deque([(link[0], 0)])
+    seen = {link[0]}
+    best: tuple[int, str, str] | None = None
+    while queue:
+        node_id, distance = queue.popleft()
+        node = prompt.get(node_id)
+        if not isinstance(node, dict):
+            continue
+        if node.get("class_type") in _CONSTANT_NODES:
+            inputs = node.get("inputs") or {}
+            for name in _CONSTANT_INPUTS:
+                value = inputs.get(name)
+                if isinstance(value, str):
+                    if best is None or distance < best[0]:
+                        best = (distance, node_id, name)
+                    break
+            continue
+        for value in (node.get("inputs") or {}).values():
+            if (isinstance(value, list) and len(value) == 2
+                    and isinstance(value[0], str)
+                    and value[0] in prompt and value[0] not in seen):
+                seen.add(value[0])
+                queue.append((value[0], distance + 1))
+    if best is None:
+        return None
+    return best[1], best[2]
+
+
 def infer_parameters(prompt: dict) -> dict[str, ParameterSpec]:
     """parameters 맵이 없는 워크플로에서 조작할 파라미터를 찾는다.
 
@@ -470,8 +508,13 @@ def infer_parameters(prompt: dict) -> dict[str, ParameterSpec]:
         for input_name in _TEXT_INPUTS:
             if input_name not in inputs:
                 continue
-            if not isinstance(inputs[input_name], list):
+            value = inputs[input_name]
+            if not isinstance(value, list):
                 prompt_candidates.append((node_id, input_name))
+            else:
+                source = _nearest_constant_source(prompt, value)
+                if source is not None:
+                    prompt_candidates.append(source)
             break
 
     # 2) 실제로 쓰이는 샘플러 노드 찾기

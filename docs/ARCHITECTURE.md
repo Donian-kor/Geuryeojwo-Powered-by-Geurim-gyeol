@@ -4,8 +4,8 @@
 아키텍처 목표와 **현재 구현**을 함께 적는다. 구현과 다른 부분은
 코드 기준이 아니라 목표이므로 §9 에 따로 모은다.
 
-- 기준 커밋: `4f14f67`
-- 마지막 검증: pytest 85개 통과 (아키텍처 쪽 코드 전수 확인)
+- 기준 커밋: `623d6e2`
+- 마지막 검증: pytest 394개 통과 (아키텍처 쪽 코드 전수 확인)
 
 ## 1. 왜 ComfyUI 를 쓰는지
 
@@ -25,8 +25,8 @@
 
 | 항목 | 값 |
 |---|---|
-| 제품 | 그려줘 v0.2 (Geuryeojwo) |
-| 엔진 | 그림결 (Geurim-gyeol) v0.2 |
+| 제품 | 그려줘 v0.7.0 (Geuryeojwo) |
+| 엔진 | 그림결 (Geurim-gyeol) v0.7.0 |
 | 런타임 | ComfyUI (외부 프로세스, HTTP/WebSocket) |
 | 언어 / GUI | Python 3.x / PySide6 |
 | 버전 단일 출처 | `app/__init__.py` 의 `__version__` = `0.7.0` |
@@ -36,13 +36,13 @@
 
 ```
 ┌──────────────────────────────────────────┐
-│           그려줘 v0.2 (PySide6)           │
+│           그려줘 v0.7.0 (PySide6)        │
 │  Generate │ Model │ History              │
 └────────────────┬─────────────────────────┘
                  │ HTTP + WebSocket (127.0.0.1:8188)
                  ▼
 ┌──────────────────────────────────────────┐
-│           그림결 v0.2 (Engine)            │
+│           그림결 v0.7.0 (Engine)         │
 │  GeurimGyeolEngine  — 생성 오케스트레이션  │
 │  Workflow / infer_parameters             │
 │  ComfyClient      — HTTP/WebSocket        │
@@ -309,19 +309,22 @@ sessions/YYYY-MM-DD/
 app/
   __init__.py               버전 상수
   comfy/
-    client.py      444줄    ComfyClient · SystemInfo · extract_text_outputs
-    config.py      186줄    ComfyUIConfig
-    workflow.py    354줄    Workflow · ParameterSpec · infer_parameters · collect_extra
+    client.py       633줄   ComfyClient · SystemInfo · extract_text_outputs
+    workflow.py     917줄   Workflow · ParameterSpec · infer_parameters · collect_extra
+    check.py        431줄   설치된 모델 확인 안내
+    model_family.py 311줄   모델 계열 판별
+    config.py       285줄   ComfyUIConfig
   engine/
-    comfy_engine.py 571줄  GeurimGyeolEngine · GenerationRequest/Result
-    health.py        88줄  UsageLevel · Thresholds · ram/vram/gpu/cpu_level
-    output/manager.py 172줄  OutputManager · OutputMetadata · next_index
-    session/manager.py 258줄 SessionManager · SessionMetadata · _slugify
+    comfy_engine.py 1095줄 GeurimGyeolEngine · GenerationRequest/Result
+    session/manager.py 305줄 SessionManager · SessionMetadata · _slugify
+    output/manager.py  197줄 OutputManager · OutputMetadata · next_index
+    health.py        122줄 UsageLevel · Thresholds · ram/vram/gpu/cpu_level
   gui/
-    main_window.py  1075줄  MainWindow · ModelInfoPanel · _paint_usage
-    session_browser.py 427줄 HistoryBrowser
-    gpu_usage.py    163줄  GpuUsageReader (nvidia-smi 상주)
-    theme/manager.py 193줄  ThemeManager
+    main_window.py   1817줄 MainWindow · ModelInfoPanel · _paint_usage
+    session_browser.py 660줄 HistoryBrowser
+    import_dialog.py 313줄 ImportWorkflowDialog
+    theme/manager.py  208줄 ThemeManager
+    gpu_usage.py     214줄 GpuUsageReader (nvidia-smi 상주)
 
 workflows/     ComfyUI API 형식 워크플로
 config/        comfyui.json · theme_config.json
@@ -343,12 +346,11 @@ LoRA 강도 슬라이더는 `Generation` 프레임 안에서 파라미터와 함
 `pages/ widgets/ controllers/ workers/` 로 분리하는 안이 있다.
 **아직 승인·구현되지 않았다.**
 
-`app/gui/pages/ widgets/ controllers/ workers/`,
-`app/engine/generation/ storage/ comfy/` 는 **목표 구조를 표현하기 위해
-만든 자리표시자 폴더이며 실제 코드는 없다.** `app/gui/page_manager.py`,
-`app/engine/generation/result.py`, `app/engine/storage/identity.py`,
-`app/engine/comfy/compatibility.py` 도 정의되어 있으나 어디서도
-import 하지 않는다.
+2026-10-04 에 자리표시자로만 만들어 두었던 빈 폴더와 미사용 파일은
+모두 지웠다 (`app/gui/pages/` `widgets/` `controllers/` `workers/`,
+`app/engine/generation/` `storage/` `comfy/`, `app/gui/page_manager.py`,
+그리고 코드가 없던 `app/features/` `app/ui/` `app/models/`).
+구조를 다시 세울 때는 이 단계를 거치지 않고 한 번에 한다.
 
 ## 10. 의존성
 
@@ -366,28 +368,35 @@ ComfyUI 처이다. 프라인드라브리를 비한 외부 의존성은 위 목�
 
 ## 11. 테스트
 
-`tests/` 6개 파일, 85개.
+`tests/` 18개 파일, 394개.
 
 | 파일 | 개수 | 다루는 것 |
 |---|---|---|
-| `test_comfy_engine.py` | 47 | 워크플로 파싱, 값 주입, 메타데이터, 생성 |
-| `test_gpu_usage.py` | 27 | nvidia-smi 파싱, 사용률·VRAM 동시 조회, 부재 대응 |
+| `test_comfy_engine.py` | 70 | 워크플로 파싱, 값 주입, 메타데이터, 생성 |
+| `test_model_selection.py` | 31 | 모델 계열 판별 · 설치 판정 · 미설치 차단 |
+| `test_check.py` | 31 | 설치된 모델 확인 안내 |
+| `test_infer_rules.py` | 32 | 파라미터 자동 인식 규칙 |
+| `test_import_dialog.py` | 29 | 워크플로 가져오기 대화상자 |
+| `test_gpu_usage.py` | 28 | nvidia-smi 파싱, 사용률·VRAM 동시 조회, 부재 대응 |
+| `test_workflow_rules.py` | 23 | 모델 설치 판정 · 값 조립 (GUI 없음) |
+| `test_base_workflows.py` | 21 | 계열별 기본 워크플로 |
+| `test_enhancer_injection.py` | 21 | 프롬프트 인핸서 주입 |
+| `test_model_family.py` | 18 | 모델 계열 분류 |
+| `test_status_bar.py` | 19 | 갱신 주기 · CPU 블로킹 · 단계 색 · ModelInfo 일치 |
 | `test_health.py` | 19 | 자원별 경고 단계와 표기 (GUI 없음) |
 | `test_output_session.py` | 17 | 저장 · 인덱스 충돌 · 폴더명 · 버전 |
-| `test_status_bar.py` | 15 | 갱신 주기 · CPU 블로킹 · 단계 색 · ModelInfo 일치 |
+| `test_config.py` | 14 | 접속 설정 읽기 · 쓰기 · 기본값 |
 | `test_history_browser.py` | 14 | 기록 1줄 목록, 썸네일, 클릭 1번 미리보기 |
-| `test_workflow_rules.py` | 11 | 모델 설치 판정 · 값 조립 (GUI 없음) |
-| `test_model_selection.py` | 6 | 미설치 모델 표시와 생성 차단 |
+| `test_non_blocking_refresh.py` | 6 | 새로고침이 GUI 스레드를 막지 않음 |
 | `test_websocket_flow.py` | 4 | 실제 소켓으로 WS 순서 · prompt_id 필터 |
-| `test_non_blocking_refresh.py` | 4 | 새로고침이 GUI 스레드를 막지 않음 |
-| **합계** | **164** | |
+| **합계** | **394** | |
 
 `conftest.py` 는 `QT_QPA_PLATFORM=offscreen` 만 기본 설정해
 GUI 테스트를 화면 없이 돌린다.
 
 **네트워크를 막는 장치는 없다.** 서버에 닿지 않는 것은 각 테스트가
 `monkeypatch` 로 `get_system_info` · `model_options` · `generate` 등을
-직접 대체해서이다. 실측 — 스위트 164개 실행 중 ComfyUI PID 불변,
+직접 대체해서이다. 실측 — 스위트 394개 실행 중 ComfyUI PID 불변,
 8188 포트로의 TCP 연결 0건. 다만 테스트를 새로 추가하면서 이 관례를
 빼먹으면 사용자의 서버를 건드릴 수 있다. 실제 생성 검증이 필요하면
 pytest 가 아니라 `tools/smoke_generate.py` 를 쓴다.
