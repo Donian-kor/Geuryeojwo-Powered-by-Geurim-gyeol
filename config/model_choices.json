@@ -18,7 +18,7 @@
     "UNETLoader_weight_dtype": "default",
     "CLIPLoader_device": "default"
   },
-  "z-image": {
+  "zanime": {
     "checkpoint": "z-anime-base-aio-fp8.safetensors"
   },
   "krea2 turbo t2i": {

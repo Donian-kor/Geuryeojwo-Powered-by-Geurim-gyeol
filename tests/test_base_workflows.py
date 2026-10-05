@@ -124,7 +124,7 @@ def test_base_workflows_list_models_folder():
     """base/ 아래 파일도 목록에 잡혀야 고를 수 있다."""
     names = {p.name for p in list_workflows(BASE_DIR.parent)}
     assert "sdxl.json" in names, "base/ 아래 워크플로가 목록에 없다"
-    assert "z-image.json" in names
+    assert "zanime.json" in names
 
 
 def test_base_workflow_declares_family_without_model_files():
@@ -312,18 +312,18 @@ def test_checkpoint_is_picked_for_checkpoint_style_workflow(qapp, models_dir, mo
 
 
 # --- AIO 체크포인트 (모델+CLIP+VAE가 한 파일) ---------------------------
-# Z-Image 계열 기본 워크플로는 CheckpointLoaderSimple(ckpt_name)로
+# Z-Image 계열 기본 워크플로(zanime)는 CheckpointLoaderSimple(ckpt_name)로
 # AIO 체크포인트를 불러온다. UNETLoader 구조와 달라 모델 칸이
-# checkpoints 가 아니라 checkpoints 에서 고른다.
+# checkpoints 폴더에서 고른다.
 
 
 def test_aio_checkpoint_workflow_picks_aio_model(qapp, tmp_path, monkeypatch):
-    """회귀: AIO 체크포인트 워크플로(z-image)가 모델을 고를 수 있어야 한다.
+    """회귀: AIO 체크포인트 워크플로(zanime)가 모델을 고를 수 있어야 한다.
 
-    이전 z-image.json 은 UNETLoader 를 썼다. diffusion_models 에 AIO
-    체크포인트가 없으면 후보가 0개가 돼 '계열 모델이 없습니다'로 막혔다.
-    CheckpointLoaderSimple 으로 바꾼 뒤에는 checkpoints 에 있는 AIO
-    체크포인트가 자동으로 고려져야 한다.
+    배포 워크플로가 UNETLoader 를 썼을 때 diffusion_models 에 AIO 체크포인트가
+    없으면 후보가 0개가 돼 '계열 모델이 없습니다'로 막혔다.
+    CheckpointLoaderSimple 을 쓰는 Z-Anime 워크플로에서는 checkpoints 에 있는
+    AIO 체크포인트가 자동으로 고려져야 한다.
     """
     from test_model_family import ZIMAGE_KEYS, _safetensors
 
@@ -338,7 +338,7 @@ def test_aio_checkpoint_workflow_picks_aio_model(qapp, tmp_path, monkeypatch):
     options["checkpoints"] = ["z-anime-base-aio.safetensors"]
     window = _plain_window(qapp, monkeypatch)
     try:
-        _show(window, "z-image", root, options)
+        _show(window, "zanime", root, options)
         combo = window.model_combos["checkpoint"]
         assert combo.currentText() == "z-anime-base-aio.safetensors"
         assert window._missing_family_model() == ""

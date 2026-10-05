@@ -40,8 +40,8 @@ MODELS_DIR = Path(
 CASES = {
     "sdxl": dict(prompt="a cute orange cat, studio photo", width=512,
                  height=512, steps=8, cfg=7.0),
-    "z-image": dict(prompt="a cute orange cat, studio photo", width=512,
-                    height=512, steps=8, cfg=1.0),
+    "zanime": dict(prompt="a cute orange cat, studio photo", width=512,
+                  height=512, steps=8, cfg=1.1),
     "qwen-image": dict(prompt="a cute orange cat, studio photo", width=512,
                        height=512, steps=12, cfg=1.0),
     # ERNIE 는 모델이 Base / Turbo 로 나뉘고 최적값이 정반대다.
