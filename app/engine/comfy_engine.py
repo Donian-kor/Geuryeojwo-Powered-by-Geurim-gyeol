@@ -24,7 +24,7 @@ from .session.manager import SessionManager, SessionMetadata
 # 이미지를 남기는 출력 노드 (앞에서부터 우선)
 _OUTPUT_NODES = ("SaveImage", "PreviewImage", "SaveAnimatedWEBP", "SaveAnimatedPNG")
 # 프롬프트 인핸서 노드로 간주하는 class_type
-_ENHANCER_TYPES = ("PromptEnhance", "PromptEnhancer", "PromptExpander")
+_ENHANCER_TYPES = ("PromptEnhance", "PromptEnhancer", "PromptExpander", "TextGenerate")
 # 인핸서 노드에서 LLM 모델명을 읽어올 입력 키 (우선순위 순).
 # 인핸서는 API 모드 / 로컬 GGUF / 사용자 지정 모델을 지원하는데,
 # 어느 쪽이 실제로 쓰였는지는 api_mode 라는 자유 입력 문자열에만 있고
@@ -49,6 +49,9 @@ _ENHANCER_LOCAL_MODE_MARK = "gguf"
 # 모델은 여기 걸리지 않으므로 자동으로 붙지 않는다.
 # 어느 인코더에 붙여야 할지는 워크플로마다 달라 프로그램이 정할 수 없다.
 _PROMPT_TEXT_INPUTS = ("text", "prompt", "positive", "user_prompt")
+# 상수 입력 노드: 사용자 프롬프트가 "value" 문자열로 직접 들어있는 곳.
+# 인코더가 아니라 입력 상자이므로 앞에 붙여도 안전한 대상이다.
+_CONSTANT_NODE_TYPES = ("PrimitiveString", "PrimitiveStringMultiline")
 
 # ComfyUI 목록 조회 결과의 캐시 유효 시간(초).
 # 노드를 방금 설치했을 수 있으니 너무 길지 않게 둔다.
@@ -71,6 +74,14 @@ def _find_enhancer_node(prompt: dict) -> str | None:
         if isinstance(node, dict) and _is_enhancer(node.get("class_type", "")):
             return node_id
     return None
+
+
+def _is_constant_node(node: dict) -> bool:
+    """문자열 상수 입력 노드인지 판단한다."""
+    return any(
+        marker in (node.get("class_type") or "")
+        for marker in _CONSTANT_NODE_TYPES
+    )
 
 
 def _prompt_text_inputs(node: dict) -> list[str]:
@@ -101,9 +112,16 @@ def injection_target(wf: Workflow) -> tuple[str, str] | None:
     node = (wf.prompt or {}).get(spec.node)
     if not isinstance(node, dict) or _is_enhancer(node.get("class_type", "")):
         return None
-    if _prompt_text_inputs(node) != [spec.input]:
-        return None
-    return spec.node, spec.input
+    if _prompt_text_inputs(node) == [spec.input]:
+        return spec.node, spec.input
+    # 상수 입력 노드(PrimitiveStringMultiline)는 "value" 에 프롬프트를
+    # 그대로 들고 있다. _PROMPT_TEXT_INPUTS 에 없는 이름이라 위 비교가
+    # 실패하므로, 이 경우에만 따로 인정한다. (krea2 turbo t2i)
+    if _is_constant_node(node) and isinstance(
+        (node.get("inputs") or {}).get(spec.input), str
+    ):
+        return spec.node, spec.input
+    return None
 
 
 def injection_block_reason(wf: Workflow) -> str:
@@ -124,6 +142,12 @@ def injection_block_reason(wf: Workflow) -> str:
     node = (wf.prompt or {}).get(spec.node)
     if not isinstance(node, dict):
         return f"노드 {spec.node} 을(를) 찾을 수 없습니다."
+    inputs = node.get("inputs") or {}
+    # 상수 입력 노드(PrimitiveStringMultiline)는 "value" 에 프롬프트를
+    # 그대로 들고 있다. 위에서 세는 입력에 "value" 가 없어 0개로
+    # 잘못 세어지지 않도록 따로 인정한다. (krea2 turbo t2i)
+    if _is_constant_node(node) and isinstance(inputs.get(spec.input), str):
+        return ""
     count = len(_prompt_text_inputs(node))
     if count == 0:
         return (

@@ -3,15 +3,53 @@
     "checkpoint": "ERNIE-AIO-Turbo-fp8.safetensors",
     "local_model": "qwen_pe_t2i_heretic-Q4_K_M.gguf"
   },
+  "ernie": {
+    "checkpoint": "ERNIE-AIO-Base-fp8.safetensors"
+  },
+  "sdxl": {
+    "checkpoint": "RealVisXL_V5.0_fp16.safetensors"
+  },
+  "qwen-image": {
+    "unet": "qwen-image-2.1-UC-NVFP4.safetensors",
+    "clip": "qwen3vl_8b_int8_convrot.safetensors",
+    "clip_type": "qwen_image",
+    "vae": "qwen_image_2.1_vae_bf16.safetensors",
+    "local_model": "qwen_pe_t2i_heretic-Q4_K_M.gguf",
+    "UNETLoader_weight_dtype": "default",
+    "CLIPLoader_device": "default"
+  },
+  "z-image": {
+    "checkpoint": "z-anime-base-aio-fp8.safetensors"
+  },
   "krea2 turbo t2i": {
     "unet": "krea2_turbo_nvfp4.safetensors",
     "clip": "qwen3vl_4b_fp8_scaled.safetensors",
     "clip_type": "krea2",
-    "vae": "wan_2.1_vae.safetensors",
+    "vae": "qwen_image_vae.safetensors",
     "lora": "krea2_turbo_lora_rank_64_bf16.safetensors",
-    "ResolutionSelector_aspect_ratio": "16:9 (Widescreen)",
+    "ResolutionSelector_aspect_ratio": "9:16 (Portrait Widescreen)",
     "UNETLoader_weight_dtype": "default",
     "CLIPLoader_device": "default",
-    "TextGenerate_mtp": "auto"
+    "TextGenerate_mtp": "auto",
+    "local_model": "qwen_pe_t2i_heretic-Q4_K_M.gguf"
+  },
+  "qwen-image-2.1": {
+    "unet": "qwen-image-2.1-UC-NVFP4.safetensors",
+    "clip": "qwen3vl_8b_int8_convrot.safetensors",
+    "clip_type": "qwen_image",
+    "vae": "qwen_image_2.1_vae_bf16.safetensors",
+    "lora": "qwen-image-2.1-uncensored-lora.safetensors",
+    "local_model": "qwen_pe_t2i_heretic-Q4_K_M.gguf",
+    "UNETLoader_weight_dtype": "default",
+    "CLIPLoader_device": "default",
+    "QwenImage21PromptEnhancerT8_input_mode": "텍스트-이미지 생성 / Text-to-image",
+    "QwenImage21PromptEnhancerT8_wh_ratio": "16:9",
+    "QwenImage21PromptEnhancerT8_api_mode": "로컬 GGUF (llama.cpp / Qwen, 프라인)",
+    "QwenImage21PromptEnhancerT8_ai_workshop_model": "Custom (사용자 정의)",
+    "QwenImage21PromptEnhancerT8_local_mmproj": "AUTO（自动匹配）",
+    "QwenImage21PromptEnhancerT8_local_think_mode": "끄기 (추천, 속도 우선)",
+    "QwenImage21PromptEnhancerT8_local_reasoning_effort": "medium",
+    "QwenImage21PromptEnhancerT8_local_unload_policy": "실행 후 언로드 (추천)",
+    "QwenImage21PromptEnhancerT8_local_comfy_memory_policy": "AUTO (VRAM 부족 시 해제)"
   }
 }

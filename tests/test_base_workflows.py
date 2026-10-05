@@ -311,6 +311,41 @@ def test_checkpoint_is_picked_for_checkpoint_style_workflow(qapp, models_dir, mo
         window.close()
 
 
+# --- AIO 체크포인트 (모델+CLIP+VAE가 한 파일) ---------------------------
+# Z-Image 계열 기본 워크플로는 CheckpointLoaderSimple(ckpt_name)로
+# AIO 체크포인트를 불러온다. UNETLoader 구조와 달라 모델 칸이
+# checkpoints 가 아니라 checkpoints 에서 고른다.
+
+
+def test_aio_checkpoint_workflow_picks_aio_model(qapp, tmp_path, monkeypatch):
+    """회귀: AIO 체크포인트 워크플로(z-image)가 모델을 고를 수 있어야 한다.
+
+    이전 z-image.json 은 UNETLoader 를 썼다. diffusion_models 에 AIO
+    체크포인트가 없으면 후보가 0개가 돼 '계열 모델이 없습니다'로 막혔다.
+    CheckpointLoaderSimple 으로 바꾼 뒤에는 checkpoints 에 있는 AIO
+    체크포인트가 자동으로 고려져야 한다.
+    """
+    from test_model_family import ZIMAGE_KEYS, _safetensors
+
+    root = tmp_path / "models"
+    for folder in ("checkpoints", "diffusion_models", "text_encoders",
+                   "vae", "loras"):
+        (root / folder).mkdir(parents=True)
+    # AIO 체크포인트: 확산 모델 + CLIP + VAE 가 한 파일에 든다.
+    _safetensors(root / "checkpoints" / "z-anime-base-aio.safetensors",
+                 ZIMAGE_KEYS)
+    options = dict(OPTIONS)
+    options["checkpoints"] = ["z-anime-base-aio.safetensors"]
+    window = _plain_window(qapp, monkeypatch)
+    try:
+        _show(window, "z-image", root, options)
+        combo = window.model_combos["checkpoint"]
+        assert combo.currentText() == "z-anime-base-aio.safetensors"
+        assert window._missing_family_model() == ""
+    finally:
+        window.close()
+
+
 def test_other_family_model_is_not_silently_chosen(qapp, models_dir, monkeypatch):
     """Flux 워크플로에 Qwen 모델이 자동으로 고르지 않아야 한다.
 

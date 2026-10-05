@@ -61,10 +61,10 @@ def slow_engine(qapp, tmp_path, monkeypatch, project_root):
         import app.gui.main_window as mw
 
         base = json.loads(
-            (project_root / "workflows" / "qwen-image-2.1-baseline.json")
+            (project_root / "workflows" / "qwen-image-2.1.json")
             .read_text(encoding="utf-8")
         )
-        prompt = json.loads(json.dumps(base))
+        prompt = json.loads(json.dumps(base["prompt"]))
         prompt["1"]["inputs"]["unet_name"] = FAKE_OPTIONS["diffusion_models"][0]
 
         root = tmp_path / "root"

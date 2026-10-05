@@ -75,6 +75,28 @@ MULTI_ENCODER_WORKFLOW = {
         "latent_image": ["5", 0]}},
     "9": {"class_type": "SaveImage", "inputs": {"images": ["6", 0]}},
 }
+# krea2 turbo t2i 스타일: LLM(TextGenerate) 노드가 이미 존재하고,
+# 사용자 프롬프트는 PrimitiveStringMultiline 의 "value" 에 직접 들어있다.
+# TextGenerate 가 인enhancer 로 인정되어야 하고,
+# 상수 노드의 "value" 를 붙일 자리로 인정되어야 한다.
+KREA2_WORKFLOW = {
+    "30:16": {"class_type": "TextGenerate", "inputs": {
+        "system_prompt": "You are an expert prompt engineer.",
+        "user_prompt": ["30:17", 0], "model": "qwen_pe_t2i_heretic-Q4_K_M.gguf"}},
+    "30:17": {"class_type": "StringConcatenate", "inputs": {
+        "string_a": ["30:18", 0], "string_b": ["30:19", 0]}},
+    "30:18": {"class_type": "PrimitiveStringMultiline",
+              "inputs": {"value": "You are an expert prompt engineer."}},
+    "30:19": {"class_type": "PrimitiveStringMultiline", "inputs": {"value": "고양이"}},
+    "30:11": {"class_type": "CLIPLoader", "inputs": {"clip_name": "clip.safetensors"}},
+    "30:6": {"class_type": "CLIPTextEncode", "inputs": {
+        "text": ["30:16", 0], "clip": ["30:11", 0]}},
+    "30:5": {"class_type": "EmptyLatentImage", "inputs": {"width": 512, "height": 512}},
+    "30:8": {"class_type": "KSampler", "inputs": {
+        "seed": 1, "steps": 20, "cfg": 7.0, "model": ["30:7", 0],
+        "positive": ["30:6", 0], "latent_image": ["30:5", 0]}},
+    "29": {"class_type": "SaveImage", "inputs": {"images": ["30:8", 0]}},
+}
 
 
 def _write_workflow(root, name: str, prompt: dict) -> None:
@@ -150,6 +172,53 @@ def test_input_default_prefers_installed_option():
 
 
 # --- 붙일 자리 판정 --------------------------------------------------
+
+
+def test_textgenerate_is_recognized_as_enhancer(tmp_path, monkeypatch):
+    """TextGenerate 노드는 인enhancer 로 인정된다.
+
+    회귀: krea2 turbo t2i 워크플로는 LLM 노드 class_type 이 'TextGenerate' 이다.
+    _ENHANCER_TYPES 에 없으면 인enhancer 로 인식되지 않아 스위치가
+    비활성화되었다.
+    """
+    eng = _engine(tmp_path, monkeypatch, KREA2_WORKFLOW)
+    assert _find_enhancer_node(eng.active_workflow.prompt) == "30:16"
+
+
+def test_constant_node_value_is_injection_target():
+    """상수 노드(PrimitiveStringMultiline)의 value 에 붙일 수 있다.
+
+    회귀: krea2 turbo t2i 는 positive 가 PrimitiveStringMultiline 의
+    'value' 를 가리킨다. _PROMPT_TEXT_INPUTS 에 'value' 가 없어
+    _prompt_text_inputs 가 빈 목록이 되고 '프롬프트를 직접 받지 않습니다'
+    라고 차단되었다.
+    """
+    prompt = {
+        "19": {"class_type": "PrimitiveStringMultiline", "inputs": {"value": "고양이"}},
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"text": ["19", 0]}},
+    }
+    wf = type("W", (), {"prompt": prompt, "parameters": {
+        "positive": type("S", (), {"node": "19", "input": "value"})(),
+    }})()
+    assert injection_target(wf) == ("19", "value")
+    assert injection_block_reason(wf) == ""
+
+
+def test_encoder_with_value_string_is_still_refused():
+    """인코더 노드의 값 문자열 앞에는 붙이지 않는다.
+
+    회귀: 상수 노드 예외를 넣으면서 "inputs 에 문자열이 있으면 통과" 로
+    느슨하게 쓰면, 인코더(CLIPTextEncodeFlux 등)까지 통과해 버린다.
+    """
+    prompt = {
+        "4": {"class_type": "CLIPTextEncode", "inputs": {
+            "value": "고양이", "clip": ["2", 0]}},
+    }
+    wf = type("W", (), {"prompt": prompt, "parameters": {
+        "positive": type("S", (), {"node": "4", "input": "value"})(),
+    }})()
+    assert injection_target(wf) is None
+    assert injection_block_reason(wf) != ""
 
 
 def test_injection_target_found_for_single_text_input(tmp_path, monkeypatch):
