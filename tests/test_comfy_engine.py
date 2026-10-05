@@ -85,6 +85,16 @@ class _CancelStub:
         self.sent = []
         self.gate = threading.Event()
 
+    def request_cancel(self):
+        self.sent.append(("mark", None))
+        self.gate.set()
+
+    def clear_cancel(self):
+        self.sent.append(("clear", None))
+
+    def cancel_pending_seconds(self):
+        return None
+
     def interrupt_now(self, timeout=5.0):
         self.sent.append(("interrupt", timeout))
         self.gate.set()

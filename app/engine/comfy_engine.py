@@ -637,6 +637,9 @@ class GeurimGyeolEngine:
         잠금을 건드리지 않는 전용 스레드를 띄워, 버튼을 누른 즉시
         ComfyUI 에 신호가 나가게 한다. 여기서는 아무것도 기다리지 않는다.
         """
+        # 전송 전에 표시부터 남긴다. WebSocket 을 기다리는 쪽이
+        # 이걸 보고 대기를 30초로 줄인다.
+        self.client.request_cancel()
         thread = threading.Thread(
             target=self._interrupt_blocking,
             name="comfy-cancel",
@@ -982,6 +985,9 @@ class GeurimGyeolEngine:
             self.logger.info("[%s] %s", state, message)
 
         try:
+            # 이전 실행의 중지 표시를 지운다. 안 지우면 클라이언트가
+            # "중지 요청 후30초 지났나" 를 실행 시작부터 세기 시작한다.
+            self.client.clear_cancel()
             # run_details=True 로 실제 사용된 프롬프트와 prompt_id 를 함께 받는다 (B4)
             images, history, prompt_id = self._run(
                 self.client.run(

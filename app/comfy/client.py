@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -30,6 +31,20 @@ from .config import ComfyUIConfig
 
 class ComfyUIError(RuntimeError):
     """ComfyUI 호출 실패."""
+
+
+# 사용자가 직접 중지해서 멈춘 경우를 알리는 문구.
+# 클라이언트와 GUI 가 같은 문자열을 써야 "중지됨" 으로 표시된다.
+CANCELLED_MESSAGE = "사용자가 실행을 중단했습니다"
+
+# 중지 신호를 보낸 뒤 실제로 멈출 때까지 기다리는 초.
+#
+# ComfyUI 는 중단 신호를 '노드 경계'에서만 본다. LLM 프롬프트 인핸서
+# 노드가 돌고 있으면(수십 초~수 분) 그 노드가 끝나야 멈춘다.
+# (실측: 신호 11:21:57 → 실제 중단 11:24:33, 2분 36초)
+# 그래서 완전히 즉시 끝낼 수는 없다. 다만 대기를 무한정 두지 않고
+# 이 시간만 지나면 프로그램이 스스로 마무리한다.
+CANCEL_GRACE_SECONDS = 30.0
 
 
 @dataclass
@@ -88,6 +103,28 @@ class ComfyClient:
         self.client_id = str(uuid.uuid4())
         self._http: httpx.AsyncClient | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        # 중지를 요청한 시각(monotonic). None 이면 중지 요청이 없다.
+        # run() 이 이 값을 보고 얼마를 더 기다릴지 정한다.
+        self._cancelled_at: float | None = None
+
+    def request_cancel(self) -> None:
+        """중지를 요청했음을 표시한다 (전송 여부와 무관).
+
+        interrupt_now() 는 GUI 스레드가 아니라 중지 전용 스레드에서
+        불린다. WebSocket 을 기다리는 쪽도 이 값을 봐야 하므로
+        플래그를 여기서 남긴다.
+        """
+        self._cancelled_at = time.monotonic()
+
+    def clear_cancel(self) -> None:
+        """다음 실행을 위해 중지 표시를 지운다."""
+        self._cancelled_at = None
+
+    def cancel_pending_seconds(self) -> float | None:
+        """중지 요청 후 흐른 초. 요청이 없으면 None."""
+        if self._cancelled_at is None:
+            return None
+        return time.monotonic() - self._cancelled_at
 
     def _ensure_http(self) -> httpx.AsyncClient:
         """지연 생성 HTTP 클라이언트.
@@ -474,12 +511,32 @@ class ComfyClient:
 
                 while not completed:
                     remaining = deadline - asyncio.get_event_loop().time()
+
+                    # 중지를 요청했으면 더 오래 붙잡고 있지 않는다.
+                    # ComfyUI 는 신호를 노드 경계에서만 본다. LLM 노드가
+                    # 돌고 있으면 그게 끝나야 실제로 멈추므로 신호를 받은
+                    # 뒤에도 대기가 필요하다. 그 대기는 짧게 제한하고,
+                    # 넘으면 '중지됨' 으로 마무리한다.
+                    #
+                    # 회귀: 예전엔 이 제한이 없어 전체 제한(기본 300초)을
+                    # 그대로 기다렸다. ComfyUI 가 중단을 정상 종료로 보고해
+                    # execution_interrupted 가 오지 않으면 화면이 그 시간
+                    # 동안 '중지 중...' 로 멈춰 있었다.
+                    waited = self.cancel_pending_seconds()
+                    if waited is not None and waited >= CANCEL_GRACE_SECONDS:
+                        raise ComfyUIError(CANCELLED_MESSAGE)
+
                     if remaining <= 0:
                         await self.interrupt()
                         raise ComfyUIError(f"실행 시간이 {limit:.0f}초를 초과했습니다")
 
+                    # 중지가 요청된 상태라면 짧게 깨어나서 위 조건을 다시 본다.
+                    recv_timeout = min(remaining, 10)
+                    if waited is not None:
+                        recv_timeout = min(recv_timeout, CANCEL_GRACE_SECONDS - waited)
+
                     try:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=min(remaining, 10))
+                        raw = await asyncio.wait_for(ws.recv(), timeout=max(recv_timeout, 0.1))
                     except asyncio.TimeoutError:
                         continue
 
@@ -528,7 +585,7 @@ class ComfyClient:
                         completed = True
 
                     elif msg_type == "execution_interrupted":
-                        last_error = "사용자가 실행을 중단했습니다"
+                        last_error = CANCELLED_MESSAGE
                         completed = True
 
                 if last_error:

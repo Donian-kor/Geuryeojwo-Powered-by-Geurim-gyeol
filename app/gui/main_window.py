@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QListWidget, QFrame, QDialog,
 )
 from app.comfy.check import prompt_of
+from app.comfy.client import CANCELLED_MESSAGE
 from app.comfy.config import guess_models_dir
 from app.comfy.model_family import (
     compatible_models, detect_file_family, family_label, is_compatible,
@@ -97,9 +98,10 @@ def _paint_usage(label: QLabel, text: str, level: UsageLevel) -> None:
 
 
 # 사용자가 직접 중지해서 실패로 보고된 경우를 알아보는 표식.
-# ComfyClient.run() 이 execution_interrupted 를 받으면 이 문장을 넣고
-# ComfyUIError 로 바꾼다. ('사용자가 실행을 중단했습니다')
-_INTERRUPTED = "사용자가 실행을 중단했습니다"
+# ComfyClient.run() 이 execution_interrupted 를 받거나, 중지 후 30초가
+# 지나 스스로 마무리하면 이 문장을 담은 ComfyUIError 로 바꾼다.
+# (문자열은 app.comfy.client.CANCELLED_MESSAGE 과 같아야 한다)
+_INTERRUPTED = CANCELLED_MESSAGE
 
 
 class Worker(QThread):
@@ -519,6 +521,8 @@ class MainWindow(QWidget):
         # combo(긴 워크플로 이름이라 폭이 크다) 가 탭 본체의 최소 너비를
         # 밀어내 창 오른쪽에 빈 공간이 생긴다.
         tabs.setCornerWidget(workflow_strip, Qt.TopRightCorner)
+        # 생성 중 탭 전환을 막으려면 나중에 접근할 수 있어야 한다.
+        self.tabs = tabs
         root.addWidget(tabs, 1)
 
         status_bar=QHBoxLayout()
@@ -1898,6 +1902,89 @@ class MainWindow(QWidget):
                     combo.setCurrentIndex(index)
             combo.blockSignals(False)
 
+    # --- 생성 중 조작 잠금 ------------------------------------------
+
+    def _set_busy(self, busy: bool) -> None:
+        """생성 중 조작을 막거나 되돌린다.
+
+        왜 막는가:
+        생성은 워커 스레드에서 도는 중이라 워크플로·모델·파라미터를
+        바꿔도 그 실행에는 반영되지 않는다. 그런데 화면만 바뀌면 사용자는
+        바뀐 설정으로 그려질 줄 알고 기다린다. 탭 전환까지 막는 이유는
+        같은 이유로 History 탭을 열면 진행 중인 작업과 다른 기록이
+        동시에 보여 헷갈리기 때문이다.
+        """
+        if busy:
+            self._busy_targets = self._input_widgets()
+            # 탭 바 상태를 widgets 를 끄기 전에 읽어야 한다.
+            # 탭 바는 tabs 의 자식이라 findChildren 에도 잡히므로,
+            # 아래에서 꺼진 뒤에 읽으면 언제나 False 로 기록된다.
+            tabs = getattr(self, "tabs", None)
+            tab_bar = tabs.tabBar() if tabs is not None else None
+            self._tab_saved = tab_bar.isEnabled() if tab_bar is not None else None
+            # 상태를 전부 읽은 뒤에 한꺼번에 꺼야 한다.
+            #
+            # Qt 의 isEnabled() 는 부모 상태까지 함께 본다. 위젯을 하나씩
+            # 끄면서 저장하면, 그보다 뒤에 나오는 위젯은 '부모가 꺼진 상태'로
+            # 읽힌다. 되돌릴 때 전부 False 로 복구되며 버튼이 영영 죽는다.
+            # (회귀: 이 버그로 완료 후에도 모든 칸이 꺼져 있었다)
+            self._busy_saved = [
+                (widget, widget.isEnabled()) for widget in self._busy_targets
+            ]
+            for widget in self._busy_targets:
+                widget.setEnabled(False)
+        else:
+            for (widget, was_enabled) in getattr(self, "_busy_saved", []):
+                widget.setEnabled(was_enabled)
+            self._busy_saved = []
+            self._busy_targets = []
+            # widgets 복구가 끝난 뒤에 탭 바를 되돌린다. 순서가 바뀌면
+            # 위에서 켠 탭 바가 widgets 목록의 꺼진 값으로 다시 덮인다.
+            tabs = getattr(self, "tabs", None)
+            if tabs is not None and getattr(self, "_tab_saved", None) is not None:
+                tabs.tabBar().setEnabled(self._tab_saved)
+            self._tab_saved = None
+        # 중지 버튼만은 언제든 눌러야 멈출 수 있다.
+        if busy:
+            self.cancel.setEnabled(True)
+            self.cancel.setVisible(True)
+
+    def _input_widgets(self) -> list:
+        """생성 중 잠가야 하는 입력 위젯 목록."""
+        widgets = [
+            self.generate, self.refresh,
+            self.prompt, self.neg,
+            self.workflow, self.w, self.h, self.steps, self.cfg, self.seed,
+            getattr(self, "advanced_btn", None),
+            getattr(self, "enhance", None),
+            getattr(self, "workflow_list", None),
+            getattr(self, "import_btn", None),
+            getattr(self, "delete_btn", None),
+            getattr(self, "sampler", None),
+            getattr(self, "scheduler", None),
+        ]
+        widgets.extend(getattr(self, "model_combos", {}).values())
+        widgets.extend(slider for _, _, slider in getattr(self, "_lora_sliders", []))
+        # 탭 내부 위젯까지 잠근다. 창 전체를 한 번에 끄면 중지 버튼까지 죽어
+        # 사용자가 멈출 수단이 사라진다.
+        tabs = getattr(self, "tabs", None)
+        skip = {id(self.cancel)}
+        if tabs is not None:
+            # 탭 바는 _set_busy 가 따로 다룬다. 여기서도 잡으면 부모가 꺼진
+            # 상태로 기록돼 복구가 깨진다.
+            skip.add(id(tabs.tabBar()))
+            for child in tabs.findChildren(QWidget):
+                if id(child) in skip:
+                    continue
+                widgets.append(child)
+        # 같은 위젯이 여러 번 들어갈 수 있다. 중복 처리하면 저장된 상태가
+        # '이미 꺼진 상태' 로 덮어써져 되돌릴 때 잘못 복구된다.
+        unique = []
+        for widget in widgets:
+            if isinstance(widget, QWidget) and widget not in unique:
+                unique.append(widget)
+        return unique
+
     def start(self):
         """생성을 시작한다."""
         if self.worker and self.worker.isRunning(): return
@@ -1958,6 +2045,9 @@ class MainWindow(QWidget):
         self.worker.done.connect(self.done)
         self.worker.failed.connect(self.fail)
         self.worker.start()
+        # 워커가 실제로 돌기 시작한다. 조작을 막는 것은 그 뒤여야 한다.
+        # (막아 두면 prompt 조합 상자가 비어 값이 안 넘어간다)
+        self._set_busy(True)
 
     def _collect_extra(self) -> dict:
         """워크플로에 선택적 파라미터 값을 모아서 반환한다.
@@ -1993,10 +2083,14 @@ class MainWindow(QWidget):
         """
         self.engine.cancel()
         self.cancel.setEnabled(False)
-        self.status.setText("중지 중...")
+        # 멈추려면 최대 30초(LLM 노드가 끝나야 한다) 기다려야 한다.
+        # 그동안 멈춘 화면처럼 보이지 않게, 실제로 프로그램이 마무리 중임을
+        # 알린다. (예전엔 "중지 중..." 만 남아 멈춘 것처럼 보였다)
+        self.status.setText("중지됨 (ComfyUI 가 현재 노드를 끝내는 중...)")
 
     def done(self,path,meta):
         if self._closing: return
+        self._set_busy(False)
         self.generate.setEnabled(True); self.cancel.setEnabled(True)
         pixmap=QPixmap(path)
         if not pixmap.isNull():
@@ -2014,6 +2108,7 @@ class MainWindow(QWidget):
         때문이다. 오류 원인은 워크플로/노드/모델 쪽에 있으므로 로그로 남긴다.
         """
         if self._closing: return
+        self._set_busy(False)
         self.generate.setEnabled(True); self.cancel.setEnabled(True)
         # 사용자가 직접 중지한 경우에는 실패가 아니라 정상적인 결과다.
         # 창을 띄우면 "내가 끊은 건데 왜 오류가 나지" 혼란스러우므로 숨긴다.
