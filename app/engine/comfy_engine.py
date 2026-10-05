@@ -63,6 +63,66 @@ _DEFAULT_MODEL_FOLDERS = (
 )
 
 
+def _enhancer_switch_gate(prompt: dict, enhancer_id: str) -> str | None:
+    """인퇰서를 켜고 끄는 워크플로 내장 스위치의 조건 노드 ID 를 찾는다.
+
+    워크플로에 인퇰서 노드가 이미 있으면 프로그램은 새 노드를 넣지 않고
+    그 노드를 그대로 쓴다. 그런데 워크플로 안에 LLM 경로를 거르는 분기
+    노드가 있으면, 그 조건 값만으로 실제 동작이 정해진다.
+    (예: krea2 turbo t2i 의 'Boolean (Refine Prompt?)' → on_true 가 LLM)
+
+    이런 스위치가 없으면 None 이다. None 이면 프로그램 스위치가 곧바로
+    통하므로 아무것도 손댈 필요가 없다.
+
+    Returns:
+        str | None: 조건 값을 담고 있는 노드 ID
+    """
+    for node in (prompt or {}).values():
+        if not isinstance(node, dict):
+            continue
+        if node.get("class_type") != "ComfySwitchNode":
+            continue
+        inputs = node.get("inputs") or {}
+        # on_true 쪽이 인퇰서여야 '이 스위치가 인퇰서를 켜는 스위치' 다.
+        target = inputs.get("on_true")
+        if not (isinstance(target, list) and len(target) == 2):
+            continue
+        if target[0] != enhancer_id:
+            continue
+        switch = inputs.get("switch")
+        if isinstance(switch, list) and len(switch) == 2:
+            return switch[0]
+    return None
+
+
+class _BooleanSwitch:
+    """워크플로 안의 TRUE/FALSE 상수를 껐다끄는 통로."""
+
+    def __init__(self, prompt: dict) -> None:
+        self.prompt = prompt
+        self._original: dict[str, Any] = {}
+
+    def set(self, node_id: str | None, value: bool) -> None:
+        """조건 노드 값을 바꾼다. 되돌릴 수 있게 원래 값을 기억한다."""
+        if not node_id:
+            return
+        node = self.prompt.get(node_id)
+        if not isinstance(node, dict):
+            return
+        inputs = node.setdefault("inputs", {})
+        if node_id not in self._original:
+            self._original[node_id] = inputs.get("value")
+        inputs["value"] = bool(value)
+
+    def restore(self) -> None:
+        for node_id, value in self._original.items():
+            node = self.prompt.get(node_id)
+            if not isinstance(node, dict):
+                continue
+            (node.get("inputs") or {})["value"] = value
+        self._original.clear()
+
+
 def _is_enhancer(class_type: str) -> bool:
     """프롬프트 인핸서 노드인지 판단한다."""
     return any(marker in class_type for marker in _ENHANCER_TYPES)
@@ -782,6 +842,26 @@ class GeurimGyeolEngine:
         self._enhancer_defaults = found
         return found
 
+    def _set_enhancer_gate(self, payload: dict, enabled: bool) -> None:
+        """워크플로 내장 분기 스위치를 프로그램 스위치에 맞춰 건다.
+
+        워크플로에 LLM 경로를 거르는 분기 노드가 있으면, 그 조건 값이
+        JSON 에 박혀 있어 프로그램 스위치를 꺼도 LLM 이 돕는다.
+        (krea2 turbo t2i 의 'Boolean (Refine Prompt?)' 가 true 로 고정)
+
+        스위치가 없으면 아무것도 하지 않는다. 이 경우 인퇰서 노드가 곧바로
+        실행 그래프에 있으므로 프로그램 스위치가 그대로 통한다.
+
+        Args:
+            payload: 실행할 그래프 (in place 로 수정된다)
+            enabled: True 이면 LLM 경로를 연다
+        """
+        enhancer_id = _find_enhancer_node(payload)
+        if enhancer_id is None:
+            return
+        gate = _enhancer_switch_gate(payload, enhancer_id)
+        _BooleanSwitch(payload).set(gate, enabled)
+
     def enhancer_status(self) -> tuple[bool, str]:
         """인핸서를 쓸 수 있는지와 안 되면 이유를 돌려준다.
 
@@ -816,6 +896,7 @@ class GeurimGyeolEngine:
             None
         """
         if _find_enhancer_node(payload) is not None:
+            self._set_enhancer_gate(payload, True)
             return
         target = injection_target(wf)
         if target is None:
@@ -915,6 +996,10 @@ class GeurimGyeolEngine:
                 break
 
         if not enhancer_id:
+            # 분기 스위치 뒤에 인퇰서가 숨어 있는 경우다.
+            # 연결을 끊을 수 없으므로 스위치 값으로 LLM 경로를 닫는다.
+            # (이것이 없으면 스위치를 꺼도 워크플로에 박힌 값 때문에 LLM 이 돈다)
+            self._set_enhancer_gate(payload, False)
             return payload
 
         # 2) 인핸서를 참조하는 다른 노드(T8ShowText 등)의 연결도 끊는다.

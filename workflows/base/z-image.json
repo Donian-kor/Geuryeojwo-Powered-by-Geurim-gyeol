@@ -1,6 +1,6 @@
 {
   "name": "기본 · Z-Image",
-  "description": "Z-Image 계열 기본 워크플로. AIO 체크포인트(모델+CLIP+VAE가 한 파일)를 씁니다. 30스 tepp / cfg 7.0 이 Base 최적값입니다.",
+  "description": "Z-Image 계열 기본 워크플로. AIO 체크포인트(모델+CLIP+VAE가 한 파일)를 씁니다. shift 3.5 / steps 10 / cfg 1.1 / beta 는 Z-Anime 배포 워크플로의 값입니다.",
   "family": "zimage",
   "output_node": "7",
   "prompt": {
@@ -29,14 +29,14 @@
     },
     "5": {
       "class_type": "ModelSamplingAuraFlow",
-      "inputs": { "shift": 3.0, "sampling": "flow", "model": ["1", 0] },
+      "inputs": { "shift": 3.5, "sampling": "flow", "model": ["1", 0] },
       "_meta": { "title": "모델 샘플링 (AuraFlow)" }
     },
     "6": {
       "class_type": "KSampler",
       "inputs": {
-        "seed": 0, "steps": 30, "cfg": 7.0,
-        "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0,
+        "seed": 0, "steps": 10, "cfg": 1.1,
+        "sampler_name": "euler", "scheduler": "beta", "denoise": 1.0,
         "model": ["5", 0], "positive": ["2", 0], "negative": ["3", 0],
         "latent_image": ["4", 0]
       },

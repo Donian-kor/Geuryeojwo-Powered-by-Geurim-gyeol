@@ -25,8 +25,8 @@ from app.comfy.client import (
     ComfyClient, SystemInfo, _input_default, _input_options,
 )
 from app.engine.comfy_engine import (
-    GeurimGyeolEngine, _enhancer_model, _find_enhancer_node,
-    _free_node_id, injection_block_reason, injection_target,
+    GeurimGyeolEngine, _enhancer_model, _enhancer_switch_gate,
+    _find_enhancer_node, _free_node_id, injection_block_reason, injection_target,
 )
 
 ENHANCER_CLASS = "QwenImage21PromptEnhancerT8"
@@ -219,6 +219,41 @@ def test_encoder_with_value_string_is_still_refused():
     }})()
     assert injection_target(wf) is None
     assert injection_block_reason(wf) != ""
+
+
+# --- 워크플로 내장 분기 스위치 -------------------------------------
+
+
+def test_enhancer_gate_finds_boolean_behind_switch():
+    """분기 노드의 on_true 가 인퇰서면 그 조건 노드가 스위치다.
+
+    회귀 근거: krea2 turbo t2i 는 'Boolean (Refine Prompt?)' 값이 JSON 에
+    true 로 박혀 있어 프로그램 스위치를 꺼도 LLM 이 돕는다.
+    """
+    prompt = {
+        "16": {"class_type": "TextGenerate", "inputs": {"prompt": ["17", 0]}},
+        "21": {"class_type": "ComfySwitchNode", "inputs": {
+            "switch": ["24", 0], "on_false": ["19", 0], "on_true": ["16", 0]}},
+        "24": {"class_type": "PrimitiveBoolean", "inputs": {"value": True}},
+    }
+    assert _enhancer_switch_gate(prompt, "16") == "24"
+
+
+def test_enhancer_gate_ignores_switch_that_leaves_enhancer():
+    """인퇰서를 건드리지 않는 분기 노드는 스위치로 보지 않는다."""
+    prompt = {
+        "16": {"class_type": "TextGenerate", "inputs": {}},
+        "22": {"class_type": "ComfySwitchNode", "inputs": {
+            "switch": ["23", 0], "on_false": ["10", 0], "on_true": ["15", 0]}},
+        "23": {"class_type": "PrimitiveBoolean", "inputs": {"value": False}},
+    }
+    assert _enhancer_switch_gate(prompt, "16") is None
+
+
+def test_enhancer_gate_returns_none_without_switch(tmp_path, monkeypatch):
+    """분기 노드가 없는 워크플로는 프로그램 스위치가 곧바로 통한다."""
+    eng = _engine(tmp_path, monkeypatch, KREA2_WORKFLOW)
+    assert _enhancer_switch_gate(eng.active_workflow.prompt, "30:16") is None
 
 
 def test_injection_target_found_for_single_text_input(tmp_path, monkeypatch):
