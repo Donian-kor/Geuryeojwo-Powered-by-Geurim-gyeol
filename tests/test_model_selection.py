@@ -919,6 +919,34 @@ def test_advanced_button_reveals_the_rest(qapp):
         window.close()
 
 
+def test_krea2_dimensions_are_editable_and_applied(qapp):
+    """Krea2 워크플로의 고급 W/H 값이 생성 payload 에 들어간다."""
+    window = _plain_window(qapp)
+    try:
+        index = window.workflow.findData("krea2 turbo t2i")
+        assert index >= 0, "Krea2 워크플로가 목록에 없다"
+        window.workflow.setCurrentIndex(index)
+        window.advanced_btn.setChecked(True)
+        qapp.processEvents()
+
+        assert window.w.isEnabled()
+        assert window.h.isEnabled()
+        window.w.setValue(768)
+        window.h.setValue(512)
+
+        request = window.engine.build_request(
+            prompt="고양이", width=window.w.value(), height=window.h.value()
+        )
+        workflow, payload = window.engine._payload(request)
+        assert payload["30:5"]["inputs"]["width"] == 768
+        assert payload["30:5"]["inputs"]["height"] == 512
+        applied = window.engine._applied_values(workflow, payload)
+        assert applied["width"] == 768
+        assert applied["height"] == 512
+    finally:
+        window.close()
+
+
 def test_generate_tab_shows_only_the_essentials(qapp):
     """스텝·CFG·KSampler·시드·프롬프트·네거티브만 기본으로 보여야 한다."""
     window = _plain_window(qapp)

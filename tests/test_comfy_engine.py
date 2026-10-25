@@ -496,11 +496,20 @@ def test_payload_injects_request_values(engine):
     assert payload["6"]["inputs"]["seed"] == 1234
 
 
-def test_payload_keeps_workflow_default_when_seed_is_minus_one(engine):
-    """seed=-1 이면 워크플로 기본 seed 를 그대로 쓴다."""
+def test_payload_randomizes_seed_when_request_is_minus_one(engine, monkeypatch):
+    """seed=-1 이면 새 64비트 시드를 워크플로에 주입한다."""
+    calls = []
+
+    def fake_randbits(bits):
+        calls.append(bits)
+        return 987654321
+
+    monkeypatch.setattr("app.engine.comfy_engine.secrets.randbits", fake_randbits)
     req = engine.build_request(prompt="x", seed=-1)
-    _, payload = engine._payload(req)
-    assert payload["6"]["inputs"]["seed"] == 1
+    wf, payload = engine._payload(req)
+    assert payload["6"]["inputs"]["seed"] == 987654321
+    assert engine._applied_values(wf, payload)["seed"] == 987654321
+    assert calls == [64]
 
 
 def test_payload_injects_extra_values(engine):
@@ -567,6 +576,22 @@ def test_generate_saves_image_and_session(engine, fake_comfy):
     sessions = engine.sessions.list_sessions()
     assert len(sessions) == 1, "sessions/ 에 기록돼야 한다"
     assert (sessions[0] / "001.png").exists()
+
+
+def test_generate_saves_randomized_seed_in_metadata(engine, fake_comfy, monkeypatch):
+    """seed=-1 로 생성하면 실제 사용한 임의 시드를 JSON에 기록한다."""
+    fake_comfy["images"] = [{"filename": "random_seed.png", "subfolder": ""}]
+    monkeypatch.setattr(
+        "app.engine.comfy_engine.secrets.randbits", lambda bits: 987654321
+    )
+
+    result = engine.generate(engine.build_request(prompt="고양이", seed=-1))
+
+    assert result.success is True, result.error
+    assert result.metadata["seed"] == 987654321
+    metadata_path = result.image_path.with_suffix(".json")
+    data = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert data["seed"] == 987654321
 
 
 def test_generate_reports_empty_result(engine, fake_comfy):

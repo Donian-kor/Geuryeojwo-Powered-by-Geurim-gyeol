@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 import threading
 import time
 from dataclasses import dataclass, field
@@ -775,9 +776,11 @@ class GeurimGyeolEngine:
             values["steps"] = request.steps
         if "cfg" in params:
             values["cfg"] = request.cfg
-        # seed 가 -1 이면 워크플로 기본값을 그대로 쓴다 (ComfyUI 규약)
-        if "seed" in params and request.seed is not None and request.seed >= 0:
-            values["seed"] = request.seed
+        if "seed" in params and request.seed is not None:
+            if request.seed >= 0:
+                values["seed"] = request.seed
+            elif request.seed == -1:
+                values["seed"] = secrets.randbits(64)
 
         for key, value in request.extra.items():
             if value is not None:
@@ -1144,8 +1147,8 @@ class GeurimGyeolEngine:
         """ComfyUI 결과를 outputs/ 와 sessions/ 에 저장한다.
 
         metadata 는 요청값이 아니라 실제 전송된 payload 에서 읽는다.
-        (seed 를 -1 로 보내면 ComfyUI 가 임의 배정하고, 워크플로 기본값이
-        그대로 사용될 수도 있으므로 요청과 실제 값이 다를 수 있다)
+        seed=-1 요청은 ComfyUI 에 보내기 전에 임의의 값으로 바뀌므로,
+        payload 에서 읽은 시드가 실제 생성 및 저장에 사용된 값이다.
         """
         from io import BytesIO
 
