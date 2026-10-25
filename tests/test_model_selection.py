@@ -20,7 +20,10 @@ import pytest
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
+from PySide6.QtWidgets import (
+    QApplication, QLabel, QMessageBox, QStyle, QStyleOptionSpinBox,
+)
+from PySide6.QtTest import QTest
 
 from app.comfy.client import ComfyClient, SystemInfo
 from app.engine.comfy_engine import GeurimGyeolEngine
@@ -915,6 +918,51 @@ def test_advanced_button_reveals_the_rest(qapp):
         window.advanced_btn.setChecked(False)
         qapp.processEvents()
         assert window.advanced.isHidden()
+    finally:
+        window.close()
+
+
+def test_generation_spinbox_arrows_adjust_values(qapp):
+    """정수·소수 입력칸의 양쪽 화살표가 넓은 클릭 영역에서 동작한다."""
+    window = _plain_window(qapp)
+    try:
+        window.show()
+        qapp.processEvents()
+
+        for spinbox in (window.steps, window.cfg):
+            option = QStyleOptionSpinBox()
+            option.initFrom(spinbox)
+            option.rect = spinbox.rect()
+            initial_value = spinbox.value()
+            rendered = spinbox.grab().toImage()
+
+            for control, expected in (
+                (QStyle.SubControl.SC_SpinBoxUp, initial_value + spinbox.singleStep()),
+                (QStyle.SubControl.SC_SpinBoxDown, initial_value),
+            ):
+                button = spinbox.style().subControlRect(
+                    QStyle.ComplexControl.CC_SpinBox,
+                    option,
+                    control,
+                    spinbox,
+                )
+                assert button.width() >= 28
+                arrow_pixels = [
+                    rendered.pixelColor(x, y)
+                    for y in range(button.top(), button.bottom() + 1)
+                    for x in range(button.left(), button.right() + 1)
+                ]
+                assert any(
+                    color.red() > 220
+                    and color.green() > 220
+                    and color.blue() > 220
+                    for color in arrow_pixels
+                ), "화살표 아이콘이 보이지 않는다"
+                QTest.mouseClick(
+                    spinbox, Qt.MouseButton.LeftButton, pos=button.center()
+                )
+                qapp.processEvents()
+                assert spinbox.value() == pytest.approx(expected)
     finally:
         window.close()
 

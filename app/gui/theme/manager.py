@@ -106,6 +106,9 @@ class ThemeManager(QObject):
 
     def _generate_qss(self, colors: dict) -> str:
         """QSS 스타일시트 생성."""
+        icon_dir = Path(__file__).resolve().parents[3] / "assets" / "icons"
+        spin_up_icon = (icon_dir / "spin-up.svg").as_posix()
+        spin_down_icon = (icon_dir / "spin-down.svg").as_posix()
         return f"""
         QWidget {{
             background-color: {colors['background']};
@@ -145,6 +148,39 @@ class ThemeManager(QObject):
             border-radius: 4px;
             padding: 4px 8px;
             color: {colors['text']};
+        }}
+        QSpinBox::up-button, QDoubleSpinBox::up-button,
+        QSpinBox::down-button, QDoubleSpinBox::down-button {{
+            subcontrol-origin: border;
+            width: 28px;
+            border-left: 1px solid {colors['border']};
+            background-color: {colors['surface']};
+        }}
+        QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+            image: url("{spin_up_icon}");
+            width: 10px;
+            height: 7px;
+        }}
+        QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+            image: url("{spin_down_icon}");
+            width: 10px;
+            height: 7px;
+        }}
+        QSpinBox::up-button, QDoubleSpinBox::up-button {{
+            subcontrol-position: top right;
+            border-top-right-radius: 3px;
+        }}
+        QSpinBox::down-button, QDoubleSpinBox::down-button {{
+            subcontrol-position: bottom right;
+            border-bottom-right-radius: 3px;
+        }}
+        QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+        QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
+            background-color: {colors['surface_alt']};
+        }}
+        QSpinBox::up-button:pressed, QDoubleSpinBox::up-button:pressed,
+        QSpinBox::down-button:pressed, QDoubleSpinBox::down-button:pressed {{
+            background-color: {colors['accent']};
         }}
         QTextEdit, QLineEdit {{
             background-color: {colors['surface']};
