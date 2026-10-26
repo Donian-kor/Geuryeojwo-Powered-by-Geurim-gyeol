@@ -10,6 +10,9 @@ import pytest
 
 pytest.importorskip("PySide6")
 
+from PySide6.QtCore import QPoint, QTimer, Qt
+from PySide6.QtGui import QContextMenuEvent
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from app.engine.session.manager import SessionManager, SessionMetadata
@@ -215,6 +218,90 @@ def test_row_has_thumbnail_and_seed_and_time(qapp, tmp_path):
     assert not row.icon(0).isNull(), "썸네일이 없다"
     assert row.text(1) == "137011622967013", f"seed 잘림/누락: {row.text(1)}"
     assert row.text(2), "생성 시간이 없다"
+
+
+def test_ctrl_c_copies_selected_seed_cell(qapp, tmp_path):
+    """목록에서 시드 셀을 선택하고 Ctrl+C 하면 값만 복사한다."""
+    browser = _browser(tmp_path)
+    _make_session(tmp_path / "sessions", seed=137011622967013)
+    browser._refresh_list()
+    qapp.processEvents()
+
+    browser.tree.setCurrentItem(_first_row(browser), 1)
+    browser.tree.setFocus()
+    QTest.keyClick(browser.tree, Qt.Key_C, Qt.ControlModifier)
+
+    assert qapp.clipboard().text() == "137011622967013"
+
+
+def test_seed_context_menu_copies_clicked_cell(qapp, tmp_path):
+    """시드 칸을 우클릭하면 해당 칸만 복사하는 메뉴가 열린다."""
+    browser = _browser(tmp_path)
+    _make_session(tmp_path / "sessions", seed=137011622967013)
+    browser._refresh_list()
+    browser.show()
+    qapp.processEvents()
+    row = _first_row(browser)
+    rect = browser.tree.visualItemRect(row)
+    position = QPoint(
+        browser.tree.columnViewportPosition(1) + 5,
+        rect.center().y(),
+    )
+
+    def choose_copy_action():
+        menu = qapp.activePopupWidget()
+        assert menu is not None
+        action = next(
+            action for action in menu.actions()
+            if action.text() == "현재 값 복사"
+        )
+        action.trigger()
+        menu.close()
+
+    QTimer.singleShot(0, choose_copy_action)
+    QTest.mouseClick(
+        browser.tree.viewport(), Qt.RightButton, pos=position
+    )
+
+    assert qapp.clipboard().text() == "137011622967013"
+
+
+def test_ctrl_c_copies_entire_prompt_field_without_selection(qapp, tmp_path):
+    """프롬프트 필드에 커서만 둔 Ctrl+C 는 전체 프롬프트를 복사한다."""
+    browser = _browser(tmp_path)
+    prompt = "길게 저장된 전체 프롬프트"
+    browser.lbl_original.setText(prompt)
+    browser.lbl_original.setFocus()
+    QTest.keyClick(browser.lbl_original, Qt.Key_C, Qt.ControlModifier)
+
+    assert qapp.clipboard().text() == prompt
+
+
+def test_prompt_context_menu_copies_field_value(qapp, tmp_path):
+    """프롬프트 우클릭 메뉴에서 필드 값 복사를 제공한다."""
+    browser = _browser(tmp_path)
+    prompt = "우클릭으로 복사할 프롬프트"
+    browser.lbl_original.setText(prompt)
+    browser.show()
+    qapp.processEvents()
+
+    def choose_copy_action():
+        menu = qapp.activePopupWidget()
+        assert menu is not None
+        action = next(
+            action for action in menu.actions()
+            if action.text() == "필드 값 복사"
+        )
+        action.trigger()
+        menu.close()
+
+    QTimer.singleShot(0, choose_copy_action)
+    event = QContextMenuEvent(
+        QContextMenuEvent.Reason.Mouse, QPoint(1, 1), QPoint(1, 1)
+    )
+    browser.lbl_original.contextMenuEvent(event)
+
+    assert qapp.clipboard().text() == prompt
 
 
 def test_time_column_shows_no_iso_separator(qapp, tmp_path):

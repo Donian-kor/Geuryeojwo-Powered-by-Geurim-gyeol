@@ -5,14 +5,93 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton,
     QTreeWidget, QTreeWidgetItem, QSplitter, QMessageBox, QToolBar,
-    QFormLayout, QGroupBox, QTextEdit, QFileDialog,
+    QFormLayout, QGroupBox, QTextEdit, QFileDialog, QApplication, QMenu,
 )
 from app.engine.session.manager import SessionManager
 from app.engine.output.manager import OutputManager
+
+
+def _copy_text(text: str) -> None:
+    if text:
+        QApplication.clipboard().setText(text)
+
+
+class CopyableLabel(QLabel):
+    """클릭 후 Ctrl+C 또는 우클릭 메뉴로 전체 값을 복사하는 라벨."""
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+        self.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def keyPressEvent(self, event) -> None:
+        if event.matches(QKeySequence.StandardKey.Copy):
+            _copy_text(self.text())
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def contextMenuEvent(self, event) -> None:
+        menu = QMenu(self)
+        copy_action = menu.addAction("필드 값 복사")
+        copy_action.setEnabled(bool(self.text()))
+        copy_action.triggered.connect(lambda: _copy_text(self.text()))
+        menu.exec(event.globalPos())
+
+
+class CopyableTextEdit(QTextEdit):
+    """선택 복사는 기본 동작을 유지하고, 미선택 Ctrl+C 는 전체 값을 복사."""
+
+    def keyPressEvent(self, event) -> None:
+        if (
+            event.matches(QKeySequence.StandardKey.Copy)
+            and not self.textCursor().hasSelection()
+        ):
+            _copy_text(self.toPlainText())
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def contextMenuEvent(self, event) -> None:
+        menu = self.createStandardContextMenu()
+        menu.addSeparator()
+        copy_action = menu.addAction("필드 전체 복사")
+        copy_action.setEnabled(bool(self.toPlainText()))
+        copy_action.triggered.connect(lambda: _copy_text(self.toPlainText()))
+        menu.exec(event.globalPos())
+
+
+class CopyableTreeWidget(QTreeWidget):
+    """현재 행의 셀 값을 Ctrl+C 또는 우클릭 메뉴로 복사한다."""
+
+    def keyPressEvent(self, event) -> None:
+        if event.matches(QKeySequence.StandardKey.Copy):
+            item = self.currentItem()
+            if item is not None:
+                _copy_text(item.text(self.currentColumn()))
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def contextMenuEvent(self, event) -> None:
+        item = self.itemAt(event.pos())
+        if item is None or not isinstance(item.data(0, Qt.UserRole), tuple):
+            return
+        column = self.columnAt(event.pos().x())
+        if column < 0:
+            return
+        self.setCurrentItem(item, column)
+        menu = QMenu(self)
+        copy_action = menu.addAction("현재 값 복사")
+        copy_action.setEnabled(bool(item.text(column)))
+        copy_action.triggered.connect(
+            lambda: _copy_text(item.text(column))
+        )
+        menu.exec(event.globalPos())
 
 
 def _parse_iso(raw: str) -> datetime | None:
@@ -123,7 +202,7 @@ class HistoryBrowser(QWidget):
 
         splitter = QSplitter(Qt.Horizontal)
 
-        self.tree = QTreeWidget()
+        self.tree = CopyableTreeWidget()
         self.tree.setColumnCount(3)
         self.tree.setHeaderLabels(["항목", "Seed", "생성 시간"])
         # 썸네일이 붙으므로 첫 열을 넓히고, Seed 는 잘리지 않게 고정폭을 준다
@@ -139,15 +218,15 @@ class HistoryBrowser(QWidget):
 
         self.metadata_group = QGroupBox("메타데이터")
         meta_layout = QFormLayout(self.metadata_group)
-        self.lbl_original = QLabel("")
+        self.lbl_original = CopyableLabel("")
         self.lbl_original.setWordWrap(True)
-        self.lbl_enhanced = QTextEdit()
+        self.lbl_enhanced = CopyableTextEdit()
         self.lbl_enhanced.setReadOnly(True)
         self.lbl_enhanced.setMaximumHeight(100)
-        self.lbl_negative = QTextEdit()
+        self.lbl_negative = CopyableTextEdit()
         self.lbl_negative.setReadOnly(True)
         self.lbl_negative.setMaximumHeight(80)
-        self.lbl_params = QLabel("")
+        self.lbl_params = CopyableLabel("")
         self.lbl_params.setWordWrap(True)
         meta_layout.addRow("원본 프롬프트:", self.lbl_original)
         meta_layout.addRow("최종 프롬프트:", self.lbl_enhanced)
