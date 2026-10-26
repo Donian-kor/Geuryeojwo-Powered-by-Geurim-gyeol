@@ -73,6 +73,7 @@ class OutputMetadata:
     engine: str = "Geurim-gyeol"
     elapsed_seconds: float = 0.0
     llm_model: str | None = None
+    prompt_options: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -93,6 +94,7 @@ class OutputMetadata:
             "created_at": self.created_at,
             "elapsed_seconds": self.elapsed_seconds,
             "llm_model": self.llm_model,
+            "prompt_options": self.prompt_options,
         }
 
     @classmethod
@@ -115,6 +117,7 @@ class OutputMetadata:
             engine=data.get("engine", "Geurim-gyeol"),
             elapsed_seconds=data.get("elapsed_seconds", 0.0),
             llm_model=data.get("llm_model"),
+            prompt_options=data.get("prompt_options", {}),
         )
 
 

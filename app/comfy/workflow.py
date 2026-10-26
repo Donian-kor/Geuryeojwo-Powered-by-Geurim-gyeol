@@ -436,7 +436,10 @@ _MODEL_LABELS = {
 # 프롬프트를 실제로 "받아" 다음 노드로 넘기는 노드.
 # 이름이 TextEncode 로 시작하지 않아도 (인핸서 등) 후보가 된다.
 # class_type 보다 '링크가 아닌 문자열 값을 가진 prompt/text 입력' 이 더 확실한 기준이다.
-_TEXT_INPUTS = ("prompt", "text", "positive")
+_TEXT_INPUTS = (
+    "prompt", "text", "positive", "clip_l", "clip_g", "t5xxl",
+    "text_l", "text_g",
+)
 # 샘플러 노드: seed/steps/cfg 는 여기서만 조작한다.
 _SAMPLER_NODES = ("KSampler", "Sampler", "KSamplerAdvanced")
 _SAMPLER_INPUTS = (

@@ -400,6 +400,13 @@ def engine(workflow_dir: Path, monkeypatch):
     eng = GeurimGyeolEngine(workflow_dir.parent)
     eng.refresh_workflows()
     eng.system_info = SystemInfo(online=False, error="테스트 중 (오프라인)")
+    build_request = eng.build_request
+
+    def build_request_without_enhancer(*args, **kwargs):
+        kwargs.setdefault("enhance_prompt", False)
+        return build_request(*args, **kwargs)
+
+    monkeypatch.setattr(eng, "build_request", build_request_without_enhancer)
     return eng
 
 
@@ -594,6 +601,31 @@ def test_generate_saves_randomized_seed_in_metadata(engine, fake_comfy, monkeypa
     assert data["seed"] == 987654321
 
 
+def test_generate_saves_prompt_options_separately(engine, fake_comfy):
+    """원문 프롬프트와 연출 선택을 별도로 결과·세션에 기록한다."""
+    fake_comfy["images"] = [{"filename": "prompt_options.png", "subfolder": ""}]
+    options = {"style": "Japanese anime style", "lighting": "soft natural lighting"}
+
+    result = engine.generate(engine.build_request(
+        prompt="고양이", prompt_options=options, enhance_prompt=False
+    ))
+
+    assert result.success is True, result.error
+    output_data = json.loads(
+        result.image_path.with_suffix(".json").read_text(encoding="utf-8")
+    )
+    assert output_data["original_prompt"] == "고양이"
+    assert output_data["prompt_options"] == options
+    assert "Visual style: Japanese anime style" in output_data["prompt"]
+
+    session = engine.sessions.list_sessions()[0]
+    session_data = json.loads(
+        (session / "session.json").read_text(encoding="utf-8")
+    )
+    assert session_data["original_prompt"] == "고양이"
+    assert session_data["prompt_options"] == options
+
+
 def test_generate_reports_empty_result(engine, fake_comfy):
     """ComfyUI 가 빈 목록을 주면 실패로 처리한다."""
     fake_comfy["images"] = []
@@ -741,7 +773,8 @@ def test_explicit_sampler_key_resolves_via_input_name(workflow_dir: Path):
     eng = GeurimGyeolEngine(workflow_dir.parent)
     eng.refresh_workflows()
     req = eng.build_request(
-        prompt="x", extra={"sampler": "dpmpp_2m", "scheduler": "karras"}
+        prompt="x", extra={"sampler": "dpmpp_2m", "scheduler": "karras"},
+        enhance_prompt=False,
     )
     _, payload = eng._payload(req)
 

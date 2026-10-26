@@ -65,6 +65,7 @@ class SessionMetadata:
     created_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
     generation_time: float = 0.0
     images: list[dict] = field(default_factory=list)
+    prompt_options: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -83,6 +84,7 @@ class SessionMetadata:
             "created_at": self.created_at,
             "generation_time": self.generation_time,
             "images": self.images,
+            "prompt_options": self.prompt_options,
         }
 
     @classmethod
@@ -103,6 +105,7 @@ class SessionMetadata:
             created_at=data.get("created_at", datetime.now().isoformat(timespec="seconds")),
             generation_time=data.get("generation_time", 0.0),
             images=data.get("images", []),
+            prompt_options=data.get("prompt_options", {}),
         )
 
 

@@ -4,10 +4,8 @@
 LLM 을 못 썼다. 이제는 프로그램이 실행 그래프에 노드를 직접 넣는다.
 여기서는 '넣어도 되는 경우' 와 '넣으면 안 되는 경우' 를 나눠 검증한다.
 
-넣으면 안 되는 경우:
-- 텍스트 인코더가 여러 개인 모델 (Flux clip_l/t5xxl, SD3 3개)
-  → 어느 인코더에 붙여야 할지 워크플로마다 달라 정할 수 없다
-- 이미 인퇰서 노드가 있는 워크플로 → 중복이 된다
+인핸서가 이미 있는 워크플로에는 노드를 중복 추가하지 않고,
+인핸서를 사용할 수 없는 경우에는 원본 프롬프트로 조용히 생성하지 않는다.
 
 네트워크는ComfyUI 응답을 대체하고, Qt 창은 QT_QPA_PLATFORM=offscreen(conftest) 을 쓴다.
 """
@@ -262,11 +260,11 @@ def test_injection_target_found_for_single_text_input(tmp_path, monkeypatch):
     assert injection_target(eng.active_workflow) == ("4", "text")
 
 
-def test_injection_target_refused_for_multi_encoder(tmp_path, monkeypatch):
-    """Flux(clip_l/t5xxl) 처럼 인코더가 둘이면 붙이지 않는다."""
+def test_injection_target_supports_multi_encoder(tmp_path, monkeypatch):
+    """Flux(clip_l/t5xxl)처럼 입력이 여러 개여도 양성 입력을 찾는다."""
     eng = _engine(tmp_path, monkeypatch, MULTI_ENCODER_WORKFLOW)
-    assert injection_target(eng.active_workflow) is None
-    assert "프롬프트" in injection_block_reason(eng.active_workflow)
+    assert injection_target(eng.active_workflow) == ("4", "clip_l")
+    assert injection_block_reason(eng.active_workflow) == ""
 
 
 def test_injection_target_refused_when_already_present(tmp_path, monkeypatch):
@@ -287,14 +285,6 @@ def test_injection_target_refused_when_already_present(tmp_path, monkeypatch):
     assert _find_enhancer_node(payload) == "14", "새 노드를 끼워 넣으면 안 된다"
 
 
-def test_block_reason_names_the_node_for_multi_encoder():
-    """사유 문구에 어느 노드인지 나와야 사용자가 고칠 수 있다."""
-    wf = type("W", (), {"prompt": MULTI_ENCODER_WORKFLOW, "parameters": {
-        "positive": type("S", (), {"node": "4", "input": "clip_l"})(),
-    }})()
-    assert "4" in injection_block_reason(wf)
-
-
 # --- 주입 결과 --------------------------------------------------------
 
 
@@ -312,6 +302,20 @@ def test_payload_injects_enhancer_before_text_encoder(tmp_path, monkeypatch):
     node = payload[injected]
     assert node["class_type"] == ENHANCER_CLASS
     assert node["inputs"]["prompt"] == "바다 위 증기선"
+
+
+def test_payload_injects_enhancer_into_all_multi_encoder_inputs(
+    tmp_path, monkeypatch
+):
+    """멀티 인코더의 양성 문자열 입력 모두가 인핸서 결과를 받는다."""
+    eng = _engine(tmp_path, monkeypatch, MULTI_ENCODER_WORKFLOW)
+    _, payload = eng._payload(eng.build_request(prompt="안개 낀 산"))
+
+    injected = _find_enhancer_node(payload)
+    assert injected is not None
+    assert payload["4"]["inputs"]["clip_l"] == [injected, 0]
+    assert payload["4"]["inputs"]["t5xxl"] == [injected, 0]
+    assert payload[injected]["inputs"]["prompt"] == "안개 낀 산"
 
 
 def test_injected_node_fills_every_required_input(tmp_path, monkeypatch):
@@ -400,8 +404,27 @@ def test_enhancer_status_ok_when_gguf_installed(tmp_path, monkeypatch):
     assert ok is True
 
 
-def test_missing_enhancer_node_falls_back_to_raw_prompt(tmp_path, monkeypatch):
-    """인함서 노드가 아예 없으면 원본 프롬프트로 생성한다 (조용히 실패 X)."""
+def test_offline_enhancer_lookup_is_retried_when_comfyui_comes_online(
+    tmp_path, monkeypatch
+):
+    """오프라인일 때의 미탐지를 캐시하지 않아 온라인 전환 뒤 재조회한다."""
+    eng = _engine(tmp_path, monkeypatch, SINGLE_TEXT_WORKFLOW)
+    monkeypatch.setattr(
+        GeurimGyeolEngine, "online",
+        property(lambda self: self.system_info.online),
+    )
+    eng.system_info.online = False
+
+    assert eng.enhancer_defaults()[0] is None
+
+    eng.system_info.online = True
+    assert eng.enhancer_defaults()[0] == ENHANCER_CLASS
+
+
+def test_missing_enhancer_node_fails_generation_instead_of_bypassing(
+    tmp_path, monkeypatch
+):
+    """인핸서 노드가 없으면 원본 프롬프트로 조용히 생성하지 않는다."""
     eng = _engine(tmp_path, monkeypatch, SINGLE_TEXT_WORKFLOW)
 
     async def _no_defaults(self, node_class):
@@ -410,10 +433,11 @@ def test_missing_enhancer_node_falls_back_to_raw_prompt(tmp_path, monkeypatch):
     monkeypatch.setattr(ComfyClient, "get_node_defaults", _no_defaults)
     eng._enhancer_defaults = None
 
-    _, payload = eng._payload(eng.build_request(prompt="고양이"))
+    eng.system_info = SystemInfo(online=True, error="")
+    result = eng.generate(eng.build_request(prompt="고양이"))
 
-    assert _find_enhancer_node(payload) is None
-    assert payload["4"]["inputs"]["text"] == "고양이"
+    assert result.success is False
+    assert "인핸서 노드를 찾을 수 없습니다" in result.error
 
 
 # --- GUI 스위치 -------------------------------------------------------
@@ -462,15 +486,16 @@ def test_switch_stays_enabled_and_explains_auto_add(qapp, tmp_path, monkeypatch)
         window.close()
 
 
-def test_switch_is_disabled_for_multi_encoder_workflow(qapp, tmp_path, monkeypatch):
-    """붙일 수 없으면 조용히 사라지지 않고 이유를 남기고 끈다."""
+def test_switch_stays_enabled_for_multi_encoder_workflow(
+    qapp, tmp_path, monkeypatch
+):
+    """멀티 인코더 워크플로에서도 인핸서 자동 연결을 허용한다."""
     eng = _engine(tmp_path, monkeypatch, MULTI_ENCODER_WORKFLOW)
     window = _window(eng, qapp, monkeypatch, tmp_path)
     try:
         window._setup_enhancer({}, {})
-        assert window.enhance.isChecked() is False
-        assert window.enhance.isEnabled() is False
-        assert window.enhance.toolTip() != ""
+        assert window.enhance.isEnabled() is True
+        assert "자동으로 추가" in window.enhance.toolTip()
     finally:
         window.close()
 

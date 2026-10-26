@@ -635,7 +635,7 @@ class HistoryBrowser(QWidget):
             except Exception as e:
                 QMessageBox.warning(self, "오류", f"재생성할 수 없습니다: {e}")
                 return
-            prompt = metadata.enhanced_prompt
+            prompt = metadata.original_prompt or metadata.enhanced_prompt
             image_model = metadata.image_model
             params = self._params_of(metadata)
         elif self._current_image:
@@ -644,7 +644,7 @@ class HistoryBrowser(QWidget):
             except Exception as e:
                 QMessageBox.warning(self, "오류", f"재생성할 수 없습니다: {e}")
                 return
-            prompt = metadata.prompt
+            prompt = metadata.original_prompt or metadata.prompt
             image_model = metadata.model
             params = self._params_of(metadata)
         else:
@@ -661,4 +661,5 @@ class HistoryBrowser(QWidget):
             "cfg": metadata.cfg,
             "sampler": metadata.sampler,
             "scheduler": metadata.scheduler,
+            "prompt_options": metadata.prompt_options,
         }

@@ -890,12 +890,16 @@ def test_each_lora_file_and_strength_reaches_its_own_node(qapp):
 # --- Generate 탭: 기본은 최소한으로 ---------------------------------
 
 def test_advanced_settings_are_hidden_by_default(qapp):
-    """대부분의 사용자는 손댈 대상이 없다. 워크플로 값이 이미 최적값이다."""
+    """연출 선택 영역은 기본으로 접어 둔다."""
     window = _plain_window(qapp)
     try:
-        assert window.advanced.isHidden(), "고급 설정이 기본으로 떠 있다"
-        assert window.advanced_btn.text() == "고급"
+        assert window.advanced_scroll.isHidden(), "고급 설정이 기본으로 떠 있다"
+        assert window.advanced_btn.text() == "고급 연출"
         assert window.advanced_btn.isChecked() is False
+        assert window.w.isVisibleTo(window)
+        assert window.h.isVisibleTo(window)
+        assert window.scheduler.isVisibleTo(window)
+        assert window.enhance.isVisibleTo(window)
     finally:
         window.close()
 
@@ -906,10 +910,11 @@ def test_advanced_button_reveals_the_rest(qapp):
         window.advanced_btn.setChecked(True)
         qapp.processEvents()
         assert not window.advanced.isHidden()
-        assert window.advanced_btn.text() == "고급 닫기"
-        # 감춘 항목이 정말 고급 안에 있는지 확인한다
-        for widget in (window.w, window.h, window.scheduler,
-                       window.lora_box, window.enhance):
+        assert window.advanced_btn.text() == "고급 연출 닫기"
+        for widget in (
+            *window.prompt_option_widgets.values(),
+            window.prompt_preview,
+        ):
             parent = widget.parent()
             while parent is not None and parent is not window.advanced:
                 parent = parent.parent()
@@ -917,7 +922,103 @@ def test_advanced_button_reveals_the_rest(qapp):
 
         window.advanced_btn.setChecked(False)
         qapp.processEvents()
-        assert window.advanced.isHidden()
+        assert window.advanced_scroll.isHidden()
+    finally:
+        window.close()
+
+
+def test_prompt_options_are_applied_without_changing_original_prompt(qapp):
+    window = _plain_window(qapp)
+    try:
+        window.prompt.setPlainText("고양이가 정원에 있다")
+        window.prompt_option_widgets["location"].setCurrentIndex(
+            window.prompt_option_widgets["location"].findText("숲")
+        )
+        window.prompt_option_widgets["style"].setCurrentIndex(
+            window.prompt_option_widgets["style"].findText("손그림 2D 애니메이션")
+        )
+
+        options = window._selected_prompt_options()
+        assert options == {
+            "location": "a lush forest",
+            "style": "hand-drawn 2D animation with soft painted backgrounds",
+        }
+        assert window.prompt.toPlainText() == "고양이가 정원에 있다"
+
+        request = window.engine.build_request(
+            prompt=window.prompt.toPlainText(),
+            prompt_options=options,
+            enhance_prompt=False,
+        )
+        workflow, payload = window.engine._payload(request)
+
+        final_prompt = payload["2"]["inputs"]["text"]
+        assert "고양이가 정원에 있다" in final_prompt
+        assert "Location: a lush forest" in final_prompt
+        assert "Visual style: hand-drawn 2D animation" in final_prompt
+        assert window.prompt_preview.toPlainText() == final_prompt
+    finally:
+        window.close()
+
+
+def test_lens_and_aperture_choices_show_short_explanations(qapp):
+    window = _plain_window(qapp)
+    try:
+        for key, choice, expected in (
+            ("lens", "85mm portrait lens", "인물을 돋보이게"),
+            ("aperture", "f/8 aperture with deeper focus", "장면 전체를 선명하게"),
+        ):
+            combo = window.prompt_option_widgets[key]
+            index = combo.findData(choice)
+            assert index >= 0
+            assert expected in combo.itemText(index)
+            combo.setCurrentIndex(index)
+            assert combo.currentData() == choice
+            assert expected in combo.itemData(index, Qt.ItemDataRole.ToolTipRole)
+
+        window.resize(900, 700)
+        window.show()
+        window.advanced_btn.setChecked(True)
+        qapp.processEvents()
+
+        viewport = window.advanced_scroll.viewport()
+        for combo in window.prompt_option_widgets.values():
+            rect = combo.rect()
+            top_left = combo.mapTo(viewport, rect.topLeft())
+            assert top_left.x() >= 0
+            assert top_left.x() + rect.width() <= viewport.width()
+
+        grid = window.advanced.layout().itemAt(0).layout()
+        positions = {
+            key: grid.getItemPosition(index)[:2]
+            for index, key in enumerate(window.prompt_option_widgets)
+        }
+        assert positions["aperture"][0] == positions["lighting"][0]
+        assert positions["lighting"][1] == 1
+
+        assert window.advanced_scroll.verticalScrollBar().maximum() > 0
+        last_combo = window.prompt_option_widgets["style"]
+        window.advanced_scroll.verticalScrollBar().setValue(
+            window.advanced_scroll.verticalScrollBar().maximum()
+        )
+        qapp.processEvents()
+        last_top = last_combo.mapTo(viewport, last_combo.rect().topLeft())
+        assert last_top.y() < viewport.height()
+        assert last_top.y() + last_combo.height() <= viewport.height()
+
+        from PySide6.QtWidgets import QTabWidget
+
+        generate_tab = window.findChild(QTabWidget).widget(0)
+        button_top = window.generate.mapTo(
+            generate_tab, window.generate.rect().topLeft()
+        )
+        scroll_bottom = window.advanced_scroll.mapTo(
+            generate_tab, window.advanced_scroll.rect().bottomLeft()
+        )
+        assert window.generate.isVisible()
+        assert button_top.y() >= scroll_bottom.y()
+        assert button_top.y() >= 0
+        assert button_top.y() + window.generate.height() <= generate_tab.height()
     finally:
         window.close()
 

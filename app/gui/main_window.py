@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit,
     QComboBox, QSpinBox, QDoubleSpinBox, QPushButton, QProgressBar,
     QMessageBox, QGroupBox, QTabWidget, QSizePolicy, QGridLayout, QSlider, QCheckBox,
-    QListWidget, QFrame, QDialog,
+    QListWidget, QFrame, QDialog, QScrollArea,
 )
 from app.comfy.check import prompt_of
 from app.comfy.client import CANCELLED_MESSAGE
@@ -23,6 +23,9 @@ from app.comfy.workflow import (
 )
 from app.engine.comfy_engine import (
     GeurimGyeolEngine, _find_enhancer_node, injection_block_reason,
+)
+from app.engine.prompt_options import (
+    PROMPT_OPTION_FIELDS, PROMPT_OPTION_HELP, compose_prompt,
 )
 from app.engine.health import (
     UsageLevel, cpu_level, format_usage, gpu_level, ram_level, vram_level,
@@ -574,14 +577,11 @@ class MainWindow(QWidget):
         return box
 
     def _on_advanced_toggled(self, checked: bool) -> None:
-        """고급 설정 열기/닫기.
-
-        기본으로 감춰 두는 이유: 워크플로 JSON 안에 이미 그 모델에 맞는
-        값이 들어 있다. (스텝·CFG·샘플러를 제작자가 맞춰둔 값) 손댈
-        대상이 없다는 뜻이며, 화면에 다 내밀면 오히려 고를 게 많아 보인다.
-        """
-        self.advanced.setVisible(checked)
-        self.advanced_btn.setText("고급 닫기" if checked else "고급")
+        """고급 연출 옵션 열기/닫기."""
+        self.advanced_scroll.setVisible(checked)
+        self.advanced_btn.setText(
+            "고급 연출 닫기" if checked else "고급 연출"
+        )
 
     def _build_model_tab(self) -> QWidget:
         """Model 탭 — 등록된 워크플로 전체 목록, 모델 파일, 워크플로 요약.
@@ -872,7 +872,7 @@ class MainWindow(QWidget):
         self.neg.setFixedHeight(46)
         left.addWidget(self.neg)
 
-        params=QGroupBox("Generation"); pv=QVBoxLayout(params); pv.setSpacing(4)
+        params=QGroupBox("생성 설정"); pv=QVBoxLayout(params); pv.setSpacing(4)
         pf=QHBoxLayout(); pf.setSpacing(4)
         self.w=QSpinBox(); self.w.setRange(64,4096); self.w.setValue(1024); self.w.setSingleStep(64)
         self.h=QSpinBox(); self.h.setRange(64,4096); self.h.setValue(1024); self.h.setSingleStep(64)
@@ -886,15 +886,19 @@ class MainWindow(QWidget):
             lbl=QLabel(caption); lbl.setStyleSheet("color:#a0a0a0; font-size:11px;")
             box.addWidget(lbl); box.addWidget(widget); return box
 
-        # 기본으로 손댈 수 있는 값만 둔다. (W/H·스케줄러·LoRA 강도는 '고급')
         self.sampler=QComboBox(); self.sampler.setMinimumWidth(120)
         for cap, wdg in (("Steps",self.steps),("CFG",self.cfg),
                          ("Seed",self.seed),("KSampler",self.sampler)):
             pf.addLayout(_field(cap,wdg))
         pv.addLayout(pf)
 
+        size_row=QHBoxLayout(); size_row.setSpacing(4)
+        for cap, wdg in (("W",self.w),("H",self.h)):
+            size_row.addLayout(_field(cap,wdg))
         # Scheduler — ComfyUI 가 목록을 알려준다 (KSampler 기준)
         self.scheduler=QComboBox(); self.scheduler.setMinimumWidth(120)
+        size_row.addLayout(_field("Scheduler",self.scheduler))
+        pv.addLayout(size_row)
 
         # LoRA 강도 — LoRA 가 여러 개면 줄도 여러 개가 된다.
         # (_setup_lora_strength 가 만든다)
@@ -903,28 +907,71 @@ class MainWindow(QWidget):
         self._lora_rows=QVBoxLayout(self.lora_box)
         self._lora_rows.setSpacing(2); self._lora_rows.setContentsMargins(0,0,0,0)
         self._lora_sliders: list[tuple[str, QLabel, QSlider]] = []
-
+        pv.addWidget(self.lora_box)
+        pv.addWidget(self.enhance)
+        pv.addWidget(self.enhancer_warning)
         left.addWidget(params)
 
-        # --- 고급 설정 -----------------------------------------------------
-        # 워크플로 JSON 안에 이미 그 모델에 맞는 값이 들어 있다. (스텝·CFG·
-        # 샘플러를 제작자가 맞춰둔 값) 그래서 기본값은 감춰 두고, 필요한
-        # 사람만 연다. 대다수 사용자는 손댈 일이 없다.
-        self.advanced=QGroupBox("고급"); av=QVBoxLayout(self.advanced); av.setSpacing(4)
-        af=QHBoxLayout(); af.setSpacing(4)
-        for cap, wdg in (("W",self.w),("H",self.h),("Scheduler",self.scheduler)):
-            af.addLayout(_field(cap,wdg))
-        av.addLayout(af)
-        av.addWidget(self.lora_box)
-        av.addWidget(self.enhance)
-        av.addWidget(self.enhancer_warning)
-        self.advanced.setVisible(False)
-        left.addWidget(self.advanced)
+        # --- 고급 연출 -----------------------------------------------------
+        self.advanced=QGroupBox("고급 연출")
+        av=QVBoxLayout(self.advanced); av.setSpacing(4)
+        option_grid=QGridLayout(); option_grid.setSpacing(4)
+        self.prompt_option_widgets: dict[str, QComboBox] = {}
+        for index, (key, label, _prompt_label, choices) in enumerate(
+            PROMPT_OPTION_FIELDS
+        ):
+            combo=QComboBox(); combo.setEditable(True)
+            combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+            combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            combo.setMinimumContentsLength(12)
+            combo.setToolTip("목록에서 선택하거나 원하는 내용을 직접 입력하세요.")
+            combo.lineEdit().setPlaceholderText("선택 또는 직접 입력")
+            combo.view().setMinimumWidth(340)
+            combo.addItem("선택 안 함", "")
+            for choice, prompt_value in choices:
+                if prompt_value:
+                    description = PROMPT_OPTION_HELP.get(key, {}).get(choice, "")
+                    display = (
+                        f"{choice} — {description}"
+                        if description else choice
+                    )
+                    combo.addItem(display, prompt_value)
+                    if description:
+                        combo.setItemData(
+                            combo.count() - 1,
+                            description,
+                            Qt.ItemDataRole.ToolTipRole,
+                        )
+            self.prompt_option_widgets[key] = combo
+            row, column = divmod(index, 2)
+            option_grid.addLayout(_field(label, combo), row, column)
+            combo.currentTextChanged.connect(self._refresh_prompt_preview)
+        option_grid.setColumnStretch(0, 1)
+        option_grid.setColumnStretch(1, 1)
+        av.addLayout(option_grid)
+        av.addWidget(QLabel("생성에 전달될 프롬프트 미리보기"))
+        self.prompt_preview=QTextEdit()
+        self.prompt_preview.setReadOnly(True)
+        self.prompt_preview.setMaximumHeight(90)
+        av.addWidget(self.prompt_preview)
+        self.advanced_scroll=QScrollArea()
+        self.advanced_scroll.setWidgetResizable(True)
+        self.advanced_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.advanced_scroll.setMaximumHeight(300)
+        self.advanced_scroll.setWidget(self.advanced)
+        self.advanced_scroll.setVisible(False)
+        left.addWidget(self.advanced_scroll)
+        self.prompt.textChanged.connect(self._refresh_prompt_preview)
+        self._refresh_prompt_preview()
 
         buttons=QHBoxLayout()
         self.generate=QPushButton("그려줘"); self.cancel=QPushButton("중지")
         self.refresh=QPushButton("새로고침")
-        self.advanced_btn=QPushButton("고급"); self.advanced_btn.setCheckable(True)
+        self.advanced_btn=QPushButton("고급 연출"); self.advanced_btn.setCheckable(True)
         self.advanced_btn.toggled.connect(self._on_advanced_toggled)
         buttons.addWidget(self.generate); buttons.addWidget(self.cancel)
         buttons.addWidget(self.refresh); buttons.addWidget(self.advanced_btn)
@@ -946,6 +993,28 @@ class MainWindow(QWidget):
         self.cancel.clicked.connect(self.stop)
         self.refresh.clicked.connect(self.refresh_models)
         return tab
+
+    def _selected_prompt_options(self) -> dict[str, str]:
+        """연출 선택 항목을 프롬프트에 쓸 값으로 모은다."""
+        selected = {}
+        for key, combo in self.prompt_option_widgets.items():
+            value = combo.currentData()
+            if value is None or combo.currentText() != combo.itemText(combo.currentIndex()):
+                value = combo.currentText().strip()
+            if value:
+                selected[key] = str(value)
+        return selected
+
+    def _refresh_prompt_preview(self, *_args) -> None:
+        """원문은 유지하고 선택한 연출을 포함한 최종 입력을 미리 보여준다."""
+        if not hasattr(self, "prompt_preview"):
+            return
+        self.prompt_preview.setPlainText(
+            compose_prompt(
+                self.prompt.toPlainText(),
+                self._selected_prompt_options(),
+            )
+        )
 
     def _build_history_tab(self) -> QWidget:
         """History 탭 (Output Browser + Session History 통합)."""
@@ -1077,6 +1146,7 @@ class MainWindow(QWidget):
     def _apply_regenerated(self, prompt: str, params: dict) -> None:
         """저장된 파라미터를 입력칸에 되돌린다 (Output/Session 공통)."""
         self.prompt.setPlainText(prompt)
+        self._set_prompt_options(params.get("prompt_options", {}))
         for key, widget, cast in (
             ("width", self.w, int), ("height", self.h, int),
             ("steps", self.steps, int), ("cfg", self.cfg, float),
@@ -1093,6 +1163,19 @@ class MainWindow(QWidget):
         value = params.get("lora_strength", params.get("strength_model"))
         if isinstance(value, (int, float)):
             self.lora_strength.setValue(int(round(float(value) * 100)))
+
+    def _set_prompt_options(self, options: dict) -> None:
+        """결과 메타데이터에 저장된 연출 설정을 위젯에 복원한다."""
+        for key, combo in self.prompt_option_widgets.items():
+            value = str(options.get(key, "") or "")
+            index = combo.findData(value)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+            elif value:
+                combo.setEditText(value)
+            else:
+                combo.setCurrentIndex(0)
+        self._refresh_prompt_preview()
 
     def _on_regenerate(self, prompt: str, params: dict, image_model: object) -> None:
         """History 탭에서 재생성 요청.
@@ -2034,7 +2117,8 @@ class MainWindow(QWidget):
                 seed=self.seed.value(),
                 extra=self._collect_extra(),
                 enhance_prompt=self.enhance.isChecked(),
-            enhancer_model=self._enhancer_model(),
+                enhancer_model=self._enhancer_model(),
+                prompt_options=self._selected_prompt_options(),
             )
         except RuntimeError as exc:
             self.generate.setEnabled(True)

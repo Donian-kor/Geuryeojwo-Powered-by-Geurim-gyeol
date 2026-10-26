@@ -75,8 +75,11 @@ VRAM 스와핑, 프롬프트 확장.
 | GUI | 입력, 선택, 표시, 기록 열람 |
 
 프롬프트 확장은 워크플로 안의 노드(`QwenImage21PromptEnhancerT8` 등)가
-담당한다. GUI 는 스위치 하나만 노출하고, 끄면 그 노드를 실행 그래프에서
-제거한다(§7).
+담당한다. 워크플로에 인핸서 노드가 없으면 생성 요청을 보내기 전에 실행용
+그래프에 노드를 추가하고 프롬프트 입력에 연결한다. 여러 문자열 입력을
+받는 인코더도 지원하며, 연결할 수 없거나 ComfyUI에 인핸서 노드가 없으면
+원본 프롬프트로 조용히 진행하지 않고 생성 오류를 표시한다. GUI 는 스위치
+하나만 노출하고, 끄면 그 노드를 실행 그래프에서 제거한다(§7).
 
 ## 5. ComfyUI 연동 인터페이스
 
@@ -197,7 +200,7 @@ WebSocket 연결 → POST /prompt → prompt_id 확보 → 이벤트 수신
 
 | 대상 | 규칙 |
 |---|---|
-| 프롬프트 | `prompt`/`text`/`positive` 입력 중 **링크(배열)가 아닌 값**을 가진 것. KSampler 로 가는 경로가 가장 짧은 노드 |
+| 프롬프트 | `prompt`/`text`/`positive` 및 인코더의 `clip_l`/`clip_g`/`t5xxl`/`text_l`/`text_g` 입력 중 **링크(배열)가 아닌 값**을 가진 것. KSampler 로 가는 경로가 가장 짧은 노드 |
 | 샘플러 파라미터 | `seed`/`steps`/`cfg`/`denoise`/`sampler_name`/`scheduler` — `class_type`이 `KSampler`/`Sampler`/`KSamplerAdvanced` 로 시작 **AND** SaveImage/PreviewImage 에서 거슬러 올라가 만나는 샘플러 |
 | 모델 | `unet_name`→`diffusion_models`, `ckpt_name`→`checkpoints`, `clip_name`→`text_encoders`, `vae_name`→`vae`, `lora_name`→`loras` |
 | 스칼라 | `seed` `steps` `width` `height` `batch_size` `resolution` `max_output_chars` `cfg` `denoise` `guidance` `strength_model` `strength_clip` `sampler_name` `scheduler` |
@@ -431,7 +434,6 @@ pytest 가 아니라 `tools/smoke_generate.py` 를 쓴다.
 설계상 감수하는 부분 — 워크플로가 워크플로를 담는 구조(인핸서 안에 LLM 설정,
 LoRA 안에 모델 이름)가 그대로 드러난다. JSON 을 여는 것이 곧 설정을 하는
 것이라 복잡성을 숨기는 목표와는 어느 정도 어긋난다. ComfyUI 라는 선택의 대가다.
-
 
 
 

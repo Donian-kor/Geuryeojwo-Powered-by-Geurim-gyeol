@@ -20,6 +20,7 @@ from ..comfy import ComfyClient, ComfyUIConfig, ComfyUIError, SystemInfo
 from ..comfy.client import extract_text_outputs, node_input_kinds
 from ..comfy.workflow import Workflow, infer_parameters, list_workflows, load_workflow
 from .output.manager import OutputManager, OutputMetadata
+from .prompt_options import compose_prompt
 from .session.manager import SessionManager, SessionMetadata
 
 # 이미지를 남기는 출력 노드 (앞에서부터 우선)
@@ -46,10 +47,12 @@ _ENHANCER_INJECT_CLASSES = (
 # 표기가 언어와 무관하게 고르려고 'GGUF' 라는 문자열로 찾는다.
 _ENHANCER_LOCAL_MODE_MARK = "gguf"
 # 텍스트 인코더에서 "사용자 프롬프트" 를 받는 입력 이름.
-# Flux(clip_l/t5xxl) · SD3(clip_l/clip_g/t5xxl) 처럼 인코더가 여러 개인
-# 모델은 여기 걸리지 않으므로 자동으로 붙지 않는다.
-# 어느 인코더에 붙여야 할지는 워크플로마다 달라 프로그램이 정할 수 없다.
-_PROMPT_TEXT_INPUTS = ("text", "prompt", "positive", "user_prompt")
+# Flux/SD3 처럼 입력이 여러 개인 노드는 positive 파라미터로 선택된
+# 입력의 원문을 인핸서에 보내고, 그 결과를 문자열 입력 전체에 연결한다.
+_PROMPT_TEXT_INPUTS = (
+    "text", "prompt", "positive", "user_prompt", "clip_l", "clip_g",
+    "t5xxl", "text_l", "text_g",
+)
 # 상수 입력 노드: 사용자 프롬프트가 "value" 문자열로 직접 들어있는 곳.
 # 인코더가 아니라 입력 상자이므로 앞에 붙여도 안전한 대상이다.
 _CONSTANT_NODE_TYPES = ("PrimitiveString", "PrimitiveStringMultiline")
@@ -158,9 +161,8 @@ def injection_target(wf: Workflow) -> tuple[str, str] | None:
     """인핸서를 붙일 (노드 ID, 입력 이름) 을 찾는다.
 
     워크플로에 인핸서가 이미 있으면 붙일 곳이 없으므로 None.
-    프롬프트 문자열 입력이 '정확히 하나' 인 텍스트 인코더만 대상으로 한다.
-    SDXL(text_g/text_l) 처럼 둘 이상이면 어느 쪽에 붙여야 하는지
-    워크플로마다 달라 판단할 수 없으므로 넣지 않는다.
+    positive 파라미터가 가리키는 입력을 기준으로 하며, 같은 인코더가
+    여러 문자열 입력을 받으면 인핸서 결과를 해당 입력들에 모두 연결한다.
 
     Returns:
         tuple[str, str] | None: 붙일 자리, 없으면 None
@@ -173,7 +175,7 @@ def injection_target(wf: Workflow) -> tuple[str, str] | None:
     node = (wf.prompt or {}).get(spec.node)
     if not isinstance(node, dict) or _is_enhancer(node.get("class_type", "")):
         return None
-    if _prompt_text_inputs(node) == [spec.input]:
+    if spec.input in _prompt_text_inputs(node):
         return spec.node, spec.input
     # 상수 입력 노드(PrimitiveStringMultiline)는 "value" 에 프롬프트를
     # 그대로 들고 있다. _PROMPT_TEXT_INPUTS 에 없는 이름이라 위 비교가
@@ -209,18 +211,14 @@ def injection_block_reason(wf: Workflow) -> str:
     # 잘못 세어지지 않도록 따로 인정한다. (krea2 turbo t2i)
     if _is_constant_node(node) and isinstance(inputs.get(spec.input), str):
         return ""
-    count = len(_prompt_text_inputs(node))
-    if count == 0:
+    if spec.input in _prompt_text_inputs(node):
+        return ""
+    if not _prompt_text_inputs(node):
         return (
             f"{spec.node} 노드는 프롬프트를 직접 받지 않습니다. "
             "텍스트 인코더 노드가 필요합니다."
         )
-    if count > 1:
-        return (
-            f"{spec.node} 노드에 프롬프트 입력이 {count}개 있어 어디에 "
-            "연결할지 결정할 수 없습니다. 워크플로 JSON 에 직접 지정하세요."
-        )
-    return ""
+    return f"{spec.node}.{spec.input} 입력이 문자열 프롬프트가 아닙니다."
 
 
 def _free_node_id(prompt: dict) -> str:
@@ -321,6 +319,7 @@ class GenerationRequest:
     # 워크플로에 인핸서 노드가 없을 때 생성 시점에 자동으로 끼워 넣으므로
     # 노드 ID 가 없다. 그래 값을 워크플로가 아니라 여기로 보낸다.
     enhancer_model: str = ""
+    prompt_options: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -734,6 +733,7 @@ class GeurimGyeolEngine:
         extra: dict[str, Any] | None = None,
         enhance_prompt: bool = True,
         enhancer_model: str = "",
+        prompt_options: dict[str, str] | None = None,
     ) -> GenerationRequest:
         """현재 선택된 워크플로를 쓰는 생성 요청을 만든다."""
         wf = self.active_workflow
@@ -753,6 +753,7 @@ class GeurimGyeolEngine:
             extra=dict(extra or {}),
             enhance_prompt=enhance_prompt,
             enhancer_model=enhancer_model,
+            prompt_options=dict(prompt_options or {}),
         )
 
     def _payload(self, request: GenerationRequest) -> tuple[Workflow, dict]:
@@ -765,7 +766,9 @@ class GeurimGyeolEngine:
         params = wf.parameters
 
         if "positive" in params:
-            values["positive"] = request.prompt
+            values["positive"] = compose_prompt(
+                request.prompt, request.prompt_options
+            )
         if "negative" in params and request.negative_prompt:
             values["negative"] = request.negative_prompt
         if "width" in params:
@@ -815,34 +818,36 @@ class GeurimGyeolEngine:
         if self._enhancer_defaults is not None:
             return self._enhancer_defaults
         found: tuple[str | None, dict, dict] = (None, {}, {})
-        if self.online:
-            for node_class in _ENHANCER_INJECT_CLASSES:
-                defaults = self._run(self.client.get_node_defaults(node_class))
-                if not defaults:
-                    continue
-                # LLM 모델 지정값은 '선택' 입력이므로 object_info 기본값이
-                # 아니라 '설치된 것 중 첫 번째' 를 써야 한다.
-                model_inputs: dict[str, Any] = {}
-                for key in _ENHANCER_MODEL_INPUTS:
-                    options = self._run(
-                        self.client.get_node_options(node_class, key)
-                    )
-                    if options:
-                        model_inputs[key] = options[0]
-                # GGUF 가 실제로 깔려 있으면 로컬 백엔드를 고른다.
-                # 안 고르면 노드 기본값(온라인 API)이 들어가는데,
-                # 이 프로그램에는 API 키가 없어서 그대로 실패한다.
-                if "local_model" in model_inputs and "api_mode" in defaults:
-                    modes = self._run(
-                        self.client.get_node_options(node_class, "api_mode")
-                    )
-                    for mode in modes:
-                        if _ENHANCER_LOCAL_MODE_MARK in str(mode).lower():
-                            defaults = {**defaults, "api_mode": mode}
-                            break
-                found = (node_class, defaults, model_inputs)
-                break
-        self._enhancer_defaults = found
+        if not self.online:
+            return found
+        for node_class in _ENHANCER_INJECT_CLASSES:
+            defaults = self._run(self.client.get_node_defaults(node_class))
+            if not defaults:
+                continue
+            # LLM 모델 지정값은 '선택' 입력이므로 object_info 기본값이
+            # 아니라 '설치된 것 중 첫 번째' 를 써야 한다.
+            model_inputs: dict[str, Any] = {}
+            for key in _ENHANCER_MODEL_INPUTS:
+                options = self._run(
+                    self.client.get_node_options(node_class, key)
+                )
+                if options:
+                    model_inputs[key] = options[0]
+            # GGUF 가 실제로 깔려 있으면 로컬 백엔드를 고른다.
+            # 안 고르면 노드 기본값(온라인 API)이 들어가는데,
+            # 이 프로그램에는 API 키가 없어서 그대로 실패한다.
+            if "local_model" in model_inputs and "api_mode" in defaults:
+                modes = self._run(
+                    self.client.get_node_options(node_class, "api_mode")
+                )
+                for mode in modes:
+                    if _ENHANCER_LOCAL_MODE_MARK in str(mode).lower():
+                        defaults = {**defaults, "api_mode": mode}
+                        break
+            found = (node_class, defaults, model_inputs)
+            break
+        if found[0] is not None:
+            self._enhancer_defaults = found
         return found
 
     def _set_enhancer_gate(self, payload: dict, enabled: bool) -> None:
@@ -889,8 +894,7 @@ class GeurimGyeolEngine:
         """인핸서 노드가 없으면 실행 그래프에 직접 추가한다.
 
         워크플로에 이미 있으면 아무것도 하지 않는다.
-        추가하지 못하면 원본 프롬프트로 그대로 생성한다 —
-        조용히 LLM 을 돌릴 수는 없으므로, 못 넣는 게 맞아 보인다.
+        인핸서를 추가할 수 없으면 오류를 내고 생성을 중단한다.
 
         enhancer_model 은 사용자가 고른 GGUF 파일명이다.
         워크플로에 노드가 없으니 값을 받을 곳이 없으므로 여기서 물려받는다.
@@ -903,24 +907,25 @@ class GeurimGyeolEngine:
             return
         target = injection_target(wf)
         if target is None:
-            self.logger.warning(
-                "%s: 인핸서를 붙일 자리가 없어 원본 프롬프트로 생성합니다 (%s)",
-                wf.name, injection_block_reason(wf),
+            raise RuntimeError(
+                f"{wf.name}: 프롬프트 인핸서를 연결할 수 없습니다. "
+                f"{injection_block_reason(wf)}"
             )
-            return
         node_class, defaults, model_inputs = self.enhancer_defaults()
         if node_class is None:
-            self.logger.warning(
-                "%s: 인핸서 노드가 설치돼 있지 않아 원본 프롬프트로 생성합니다",
-                wf.name,
+            raise RuntimeError(
+                "프롬프트 인핸서 노드를 찾을 수 없습니다. "
+                "ComfyUI에 인핸서 노드를 설치한 뒤 다시 시도해주세요."
             )
-            return
         if enhancer_model:
             # 사용자가 고른 파일만 쓴다. ComfyUI 는 목록에 없는 값을 거부한다.
             model_inputs = {**model_inputs, "local_model": enhancer_model}
-        self._inject_enhancer(
+        if not self._inject_enhancer(
             wf, payload, node_class, defaults, model_inputs, *target
-        )
+        ):
+            raise RuntimeError(
+                f"{wf.name}: 프롬프트 인핸서 노드를 워크플로에 연결하지 못했습니다."
+            )
 
     def _inject_enhancer(
         self,
@@ -934,15 +939,15 @@ class GeurimGyeolEngine:
     ) -> bool:
         """payload 에 인핸서 노드를 추가해 프롬프트 경로에 끼워 넣는다.
 
-        텍스트 인코더의 문자열 입력을 인핸서로 옮기고, 그 자리를
-        인핸서 출력 0번(rewritten_prompt) 링크로 바꾼다.
+        텍스트 인코더의 프롬프트 문자열 입력을 인핸서로 옮기고,
+        해당 입력들을 인핸서 출력 0번(rewritten_prompt) 링크로 바꾼다.
 
         Returns:
             bool: 주입에 성공했으면 True
         """
         node = payload.get(node_id) or {}
         original = (node.get("inputs") or {}).get(input_name)
-        if not isinstance(original, str) or not original.strip():
+        if not isinstance(original, str):
             return False
 
         new_id = _free_node_id(payload)
@@ -954,7 +959,9 @@ class GeurimGyeolEngine:
             "class_type": node_class,
             "_meta": {"title": "프롬프트 인핸서 (자동 추가)"},
         }
-        node.setdefault("inputs", {})[input_name] = [new_id, 0]
+        inputs_to_link = _prompt_text_inputs(node) or [input_name]
+        for name in inputs_to_link:
+            node.setdefault("inputs", {})[name] = [new_id, 0]
         self.logger.info(
             "%s: 인핸서 %s 를 %s.%s 앞에 자동으로 연결했습니다",
             wf.name, node_class, node_id, input_name,
@@ -1187,7 +1194,8 @@ class GeurimGyeolEngine:
             seed=applied["seed"],
             model=wf.name,
             prompt=enhanced_prompt,
-            original_prompt=original_prompt,
+            original_prompt=request.prompt,
+            prompt_options=request.prompt_options,
             negative_prompt=applied["negative"],
             width=applied["width"],
             height=applied["height"],
@@ -1216,7 +1224,7 @@ class GeurimGyeolEngine:
         # 2) sessions/ 에 기록
         try:
             session_meta = SessionMetadata(
-                original_prompt=original_prompt,
+                original_prompt=request.prompt,
                 enhanced_prompt=enhanced_prompt,
                 negative_prompt=applied["negative"],
                 llm_model=llm_model,
@@ -1228,6 +1236,7 @@ class GeurimGyeolEngine:
                 cfg=applied["cfg"],
                 sampler=applied["sampler"],
                 scheduler=applied["scheduler"],
+                prompt_options=request.prompt_options,
                 generation_time=round(elapsed, 2),
                 images=[],
             )
